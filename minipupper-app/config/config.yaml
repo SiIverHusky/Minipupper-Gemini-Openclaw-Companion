@@ -1,0 +1,73 @@
+# Minipupper Operator App Configuration
+# Last Updated: 2026-05-09
+
+app:
+  name: "Minipupper Operator"
+  version: "0.1.0"
+  debug: true
+  log_level: "INFO"
+
+# Audio Configuration
+audio:
+  channels: 1
+  input_device: -1   # -1 = default input device
+  output_device: -1  # -1 = default output device
+  asr:
+    engine: "google"  # "google" (Cloud Speech-to-Text) or "whisper" (local Whisper model)
+    model: "base"  # Used only if engine is "whisper" (tiny, base, small, medium, large)
+    language: "en-US"
+    device: "cpu"  # cuda or cpu (used for whisper only)
+    compute_type: "float16"  # Used for whisper only
+    streaming: true
+  
+  tts:
+    engine: "google"  # google or piper
+    voice: "en-US-Neural2-A"
+    speed: 1.0
+    pitch: 0.0
+
+# Barge-in / Interruption Settings
+barge_in:
+  enabled: true
+  min_energy_threshold: 500  # Speech energy threshold to trigger interruption
+  detection_timeout_ms: 500  # How long to wait for speech before canceling
+  silence_duration_ms: 300   # Duration of silence to consider barge-in complete
+  voice_activity_threshold: 0.5  # VAD confidence threshold
+
+# Operator Mode Settings
+operator:
+  role: "minipupper_autonomous"  # Not dependent on OpenClaw
+  
+  # LLM Configuration
+  llm_provider: "gemini"  # "gemini" (Vertex AI), "ollama" (local), or "fallback"
+  llm_model: "gemini-2.5-flash"  # Gemini model variant
+  
+  # Context & Response
+  max_context_length: 8192  # Max tokens to keep in conversation history
+  max_response_tokens: 500   # Max tokens in generated response
+  response_timeout_seconds: 30  # Max wait for LLM response
+  
+  # Capabilities
+  enable_tool_execution: true  # Allow robot movement commands
+  
+  # Movement capabilities
+  movements:
+    enabled: true
+    max_speed: 100
+
+# Network Configuration
+network:
+  # Tailscale connectivity
+  tailscale_enabled: true
+  
+  # Fallback local connectivity
+  local_network: true
+  default_port: 8888
+
+# Logging & Monitoring
+logging:
+  file: "logs/minipupper_operator.log"
+  max_file_size_mb: 50
+  backup_count: 5
+  console_output: true
+
