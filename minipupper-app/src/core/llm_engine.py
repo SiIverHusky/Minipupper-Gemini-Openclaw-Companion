@@ -11,6 +11,21 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+from pathlib import Path
+
+# Try to load a repository-level system prompt if present
+def _load_system_prompt() -> Optional[str]:
+    try:
+        base = Path(__file__).resolve().parents[2]
+        p = base / 'config' / 'system_prompt.txt'
+        if p.exists():
+            return p.read_text(encoding='utf-8')
+    except Exception:
+        pass
+    return None
+
+_GLOBAL_SYSTEM_PROMPT = _load_system_prompt()
+
 
 @dataclass
 class Message:
@@ -45,7 +60,7 @@ class LLMProvider(ABC):
 class GeminiVertexProvider(LLMProvider):
     """Google Gemini via Vertex AI"""
     
-    def __init__(self, project_id: Optional[str] = None, model: str = "gemini-1.5-flash"):
+    def __init__(self, project_id: Optional[str] = None, model: str = "gemini-1.5-flash", system_prompt: Optional[str] = None):
         """
         Initialize Gemini Vertex provider.
         
@@ -58,6 +73,8 @@ class GeminiVertexProvider(LLMProvider):
             
             self.project_id = project_id
             self.model = model
+            # prefer explicit system_prompt, otherwise use repository-level prompt
+            self.system_prompt = system_prompt or _GLOBAL_SYSTEM_PROMPT
             self.llm = ChatVertexAI(
                 project=project_id,
                 model=model,
@@ -78,15 +95,24 @@ class GeminiVertexProvider(LLMProvider):
         
         try:
             # Convert Message objects to langchain format
-            from langchain_core.messages import HumanMessage, AIMessage
-            
+            from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
             lc_messages = []
+            # prepend system prompt if available
+            if getattr(self, 'system_prompt', None):
+                lc_messages.append(SystemMessage(content=self.system_prompt))
+
             for msg in messages:
-                if msg.role == "user":
+                role = getattr(msg, 'role', 'user')
+                if role == "user":
                     lc_messages.append(HumanMessage(content=msg.content))
-                else:
+                elif role == "assistant":
                     lc_messages.append(AIMessage(content=msg.content))
-            
+                elif role == "system":
+                    lc_messages.append(SystemMessage(content=msg.content))
+                else:
+                    lc_messages.append(HumanMessage(content=msg.content))
+
             # Generate response
             response = self.llm.invoke(lc_messages)
             return response.content
@@ -121,6 +147,8 @@ class OllamaProvider(LLMProvider):
                 model=model,
             )
             self._available = True
+            # repository-level system prompt fallback
+            self.system_prompt = _GLOBAL_SYSTEM_PROMPT
             logger.info(f"✓ Ollama ready (model: {model}, url: {base_url})")
         except Exception as e:
             self._available = False
@@ -134,6 +162,8 @@ class OllamaProvider(LLMProvider):
         try:
             # Build prompt from conversation
             prompt = self._build_prompt(messages)
+            if getattr(self, 'system_prompt', None):
+                prompt = f"{self.system_prompt}\n\n{prompt}"
             response = self.llm.invoke(prompt)
             return response.strip()
         
@@ -223,14 +253,18 @@ def create_llm_provider(
             # Gemini-specific initialization
             return GeminiVertexProvider(
                 project_id=kwargs.get("project_id"),
-                model=kwargs.get("model", "gemini-1.5-flash")
+                model=kwargs.get("model", "gemini-1.5-flash"),
+                system_prompt=kwargs.get('system_prompt')
             )
         elif provider_name == "ollama":
             # Ollama-specific initialization
-            return OllamaProvider(
+            prov = OllamaProvider(
                 base_url=kwargs.get("base_url", "http://localhost:11434"),
                 model=kwargs.get("model", "mistral")
             )
+            if kwargs.get('system_prompt'):
+                prov.system_prompt = kwargs.get('system_prompt')
+            return prov
         else:
             return provider_class()
     except Exception as e:
