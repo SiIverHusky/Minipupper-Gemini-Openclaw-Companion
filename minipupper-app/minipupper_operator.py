@@ -1,7 +1,7 @@
 """
 Minipupper Operator - Main Application
 Autonomous Operator role with robust capabilities
-Last Updated: 2026-05-09
+Last Updated: 2026-05-10
 """
 
 import logging
@@ -60,6 +60,7 @@ class MinipupperOperator:
         audio_settings = self.config.get('audio', {})
         asr_settings = audio_settings.get('asr', {})
         tts_settings = audio_settings.get('tts', {})
+        barge_in_settings = self.config.get('barge_in', {})
         default_audio_device = self._get_int_setting('AUDIO_DEVICE_INDEX', -1)
         input_device = self._get_int_setting(
             'MIC_DEVICE_INDEX',
@@ -80,10 +81,49 @@ class MinipupperOperator:
             ),
             input_device=input_device,
             output_device=output_device,
+            barge_in_enabled=bool(barge_in_settings.get('enabled', True)),
+            barge_in_vad_aggressiveness=self._get_int_setting(
+                'BARGE_IN_VAD_AGGRESSIVENESS',
+                barge_in_settings.get('vad_aggressiveness', 2),
+            ),
+            barge_in_detection_timeout_ms=self._get_int_setting(
+                'BARGE_IN_DETECTION_TIMEOUT_MS',
+                barge_in_settings.get('detection_timeout_ms', 90),
+            ),
+            barge_in_silence_duration_ms=self._get_int_setting(
+                'BARGE_IN_SILENCE_DURATION_MS',
+                barge_in_settings.get('silence_duration_ms', 300),
+            ),
+            barge_in_frame_duration_ms=self._get_int_setting(
+                'BARGE_IN_FRAME_DURATION_MS',
+                barge_in_settings.get('frame_duration_ms', 30),
+            ),
+            barge_in_aec_enabled=bool(barge_in_settings.get('aec_enabled', True)),
+            barge_in_aec_max_delay_ms=self._get_int_setting(
+                'BARGE_IN_AEC_MAX_DELAY_MS',
+                barge_in_settings.get('aec_max_delay_ms', 180),
+            ),
+            barge_in_aec_max_gain=float(os.getenv(
+                'BARGE_IN_AEC_MAX_GAIN',
+                barge_in_settings.get('aec_max_gain', 1.2),
+            )),
+            barge_in_aec_double_talk_ratio=float(os.getenv(
+                'BARGE_IN_AEC_DOUBLE_TALK_RATIO',
+                barge_in_settings.get('aec_double_talk_ratio', 1.4),
+            )),
+            barge_in_echo_suppression_threshold=float(os.getenv(
+                'BARGE_IN_ECHO_SUPPRESSION_THRESHOLD',
+                barge_in_settings.get('echo_suppression_threshold', 0.80),
+            )),
+            barge_in_echo_energy_ratio=float(os.getenv(
+                'BARGE_IN_ECHO_ENERGY_RATIO',
+                barge_in_settings.get('echo_energy_ratio', 0.45),
+            )),
             asr_engine=os.getenv('ASR_ENGINE', asr_settings.get('engine', 'google')),
             asr_model=os.getenv('WHISPER_MODEL', asr_settings.get('model', 'base')),
             asr_device=os.getenv('WHISPER_DEVICE', asr_settings.get('device', 'cpu')),
             tts_engine=tts_settings.get('engine', 'google'),
+            tts_speed=float(os.getenv('TTS_SPEED', tts_settings.get('speed', 1.0))),
             language_code=asr_settings.get('language', 'en-US'),
         )
         self.audio_manager = AudioManager(audio_config)

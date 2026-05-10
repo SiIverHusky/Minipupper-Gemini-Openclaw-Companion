@@ -29,10 +29,16 @@ audio:
 # Barge-in / Interruption Settings
 barge_in:
   enabled: true
-  min_energy_threshold: 500  # Speech energy threshold to trigger interruption
-  detection_timeout_ms: 500  # How long to wait for speech before canceling
+  vad_aggressiveness: 2  # 0-3, higher is more aggressive
+  detection_timeout_ms: 90  # How long voiced speech must persist before interrupting
   silence_duration_ms: 300   # Duration of silence to consider barge-in complete
-  voice_activity_threshold: 0.5  # VAD confidence threshold
+  frame_duration_ms: 30  # WebRTC VAD frame size
+  aec_enabled: true
+  aec_max_delay_ms: 149  # Playback-to-mic delay search window
+  aec_max_gain: 0.8  # Max subtraction gain for playback echo
+  aec_double_talk_ratio: 1.2  # Keep near-end speech when user is louder than speaker bleed
+  echo_suppression_threshold: 0.7
+  echo_energy_ratio: 0.219
 
 # Operator Mode Settings
 operator:

@@ -1,7 +1,7 @@
 """
 Audio Manager - Handles ASR and TTS with barge-in support
 Supports multiple ASR engines (Google Cloud Speech, Whisper, etc.)
-Last Updated: 2026-05-09
+Last Updated: 2026-05-10
 """
 
 import logging
@@ -37,11 +37,23 @@ class AudioConfig:
     channels: int = 1
     input_device: int = -1
     output_device: int = -1
+    barge_in_enabled: bool = True
+    barge_in_vad_aggressiveness: int = 2
+    barge_in_detection_timeout_ms: int = 90
+    barge_in_silence_duration_ms: int = 300
+    barge_in_frame_duration_ms: int = 30
+    barge_in_aec_enabled: bool = True
+    barge_in_aec_max_delay_ms: int = 180
+    barge_in_aec_max_gain: float = 1.2
+    barge_in_aec_double_talk_ratio: float = 1.4
+    barge_in_echo_suppression_threshold: float = 0.80
+    barge_in_echo_energy_ratio: float = 0.45
     asr_engine: str = "google"  # "google" or "whisper"
     asr_model: str = "base"  # For whisper fallback
     asr_device: str = "cpu"  # For whisper fallback
     tts_engine: str = "google"
     language_code: str = "en-US"
+    tts_speed: float = 1.0
 
 
 class AudioManager:
@@ -85,9 +97,20 @@ class AudioManager:
         
         # Barge-in Detection
         barge_in_config = BargeInConfig(
+            enabled=config.barge_in_enabled,
+            vad_aggressiveness=config.barge_in_vad_aggressiveness,
+            detection_timeout_ms=config.barge_in_detection_timeout_ms,
+            silence_duration_ms=config.barge_in_silence_duration_ms,
             sample_rate=config.sample_rate,
+            frame_duration_ms=config.barge_in_frame_duration_ms,
             input_device=config.input_device,
             channels=config.channels,
+            aec_enabled=config.barge_in_aec_enabled,
+            aec_max_delay_ms=config.barge_in_aec_max_delay_ms,
+            aec_max_gain=config.barge_in_aec_max_gain,
+            aec_double_talk_ratio=config.barge_in_aec_double_talk_ratio,
+            echo_suppression_threshold=config.barge_in_echo_suppression_threshold,
+            echo_energy_ratio=config.barge_in_echo_energy_ratio,
         )
         self.barge_in = BargeInDetector(barge_in_config)
         
@@ -205,7 +228,9 @@ class AudioManager:
                 name=voice_name
             )
             audio_config = texttospeech.AudioConfig(
-                audio_encoding=texttospeech.AudioEncoding.LINEAR16
+                audio_encoding=texttospeech.AudioEncoding.LINEAR16,
+                speaking_rate=float(getattr(self.config, 'tts_speed', 1.0)),
+                sample_rate_hertz=int(self.config.sample_rate),
             )
             
             response = self.tts_client.synthesize_speech(
@@ -249,38 +274,111 @@ class AudioManager:
         self.barge_in.start_listening()
         
         try:
-            # Convert audio bytes to numpy array
-            audio_array = np.frombuffer(audio_data, dtype=np.int16)
-            audio_array = audio_array.astype(np.float32) / 32768.0
-            
-            # Play in chunks to allow interruption
-            chunk_size = 4096
-            for i in range(0, len(audio_array), chunk_size):
-                if self._interrupt_event.is_set():
-                    self.logger.info("Speech interrupted by user")
-                    return False
-                
-                chunk = audio_array[i:i + chunk_size]
-                sd.play(
-                    chunk,
-                    samplerate=self.config.sample_rate,
-                    device=None if self.config.output_device < 0 else self.config.output_device,
-                )
-                # Brief wait before continuing (allows interrupt check)
-                time.sleep(len(chunk) / self.config.sample_rate * 0.5)
-            
-            # Wait for playback to finish
-            sd.wait()
+            # Convert audio bytes (LINEAR16) to numpy float32 in range [-1,1]
+            audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+
+            # Ensure correct shape for sounddevice (n_samples, channels)
+            mono = audio_array.reshape(-1, 1)
+            if self.config.channels == 1:
+                frames = mono
+            else:
+                # replicate mono to multiple channels
+                frames = np.tile(mono, (1, self.config.channels))
+
+            device = None if self.config.output_device < 0 else int(self.config.output_device)
+
+            # Temporarily set default device pair so other sd calls follow the same device
+            prev_default = None
+            try:
+                prev_default = sd.default.device
+            except Exception:
+                prev_default = None
+
+            try:
+                if prev_default and isinstance(prev_default, (list, tuple)):
+                    in_dev = prev_default[0]
+                    out_dev = prev_default[1]
+                else:
+                    in_dev = None
+                    out_dev = None
+
+                if self.config.input_device >= 0:
+                    in_dev = int(self.config.input_device)
+                if self.config.output_device >= 0:
+                    out_dev = int(self.config.output_device)
+
+                try:
+                    sd.default.device = (in_dev, out_dev)
+                except Exception:
+                    # ignore if device tuple invalid on this platform
+                    pass
+
+                # Use a single OutputStream to avoid pops/clicks from repeated stream starts
+                with sd.OutputStream(samplerate=self.config.sample_rate,
+                                     channels=self.config.channels,
+                                     dtype='float32',
+                                     device=device,
+                                     latency='low') as stream:
+
+                    frame_size = 4096
+                    pos = 0
+                    total = frames.shape[0]
+
+                    while pos < total:
+                        if self._interrupt_event.is_set():
+                            self.logger.info("Speech interrupted by user")
+                            try:
+                                stream.stop()
+                            except Exception:
+                                pass
+                            return False
+
+                        end = min(pos + frame_size, total)
+                        block = frames[pos:end]
+
+                        try:
+                            playback_pcm = np.clip(block * 32767.0, -32768, 32767).astype(np.int16)
+                            vad_frame_samples = int(
+                                self.config.sample_rate * self.config.barge_in_frame_duration_ms / 1000
+                            )
+                            vad_frame_samples = max(1, vad_frame_samples)
+
+                            mono_pcm = playback_pcm[:, 0] if playback_pcm.ndim == 2 else playback_pcm
+                            for i in range(0, mono_pcm.shape[0], vad_frame_samples):
+                                chunk = mono_pcm[i:i + vad_frame_samples]
+                                if chunk.size == 0:
+                                    continue
+                                self.barge_in.register_playback_frame(chunk.astype(np.int16).tobytes())
+                        except Exception:
+                            pass
+
+                        stream.write(block)
+                        pos = end
+
+                    # ensure playback drains
+                    try:
+                        stream.stop()
+                    except Exception:
+                        pass
+
+            finally:
+                # restore previous default device
+                try:
+                    if prev_default is not None:
+                        sd.default.device = prev_default
+                except Exception:
+                    pass
+
             return not self._interrupt_event.is_set()
-            
+
         except Exception as e:
             self.logger.error(f"Playback error: {e}")
             return False
-        
+
         finally:
             self.barge_in.stop_listening()
             self._is_speaking = False
-            
+
             if self.on_speech_end:
                 self.on_speech_end()
     
