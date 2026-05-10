@@ -229,33 +229,45 @@ AUDIO_DEVICE_INDEX=0  # Use first device for input
 
 ### 4.2 Barge-in Tuning
 
-**Environment-Specific Thresholds:**
+**Current tuning model:**
 
 ```yaml
-# Quiet environment (home/office)
-audio:
-  barge_in:
-    min_energy_threshold: 300
-
-# Normal environment (standard robot operation)
-audio:
-  barge_in:
-    min_energy_threshold: 500
-
-# Noisy environment (outdoor/factory)
-audio:
-  barge_in:
-    min_energy_threshold: 800
+barge_in:
+  vad_aggressiveness: 2
+  detection_timeout_ms: 90
+  silence_duration_ms: 300
+  frame_duration_ms: 30
+  aec_enabled: true
+  aec_max_delay_ms: 149
+  aec_max_gain: 0.8
+  aec_double_talk_ratio: 1.2
+  echo_suppression_threshold: 0.7
+  echo_energy_ratio: 0.219
+  nearend_min_cleaned_rms: 300.0
+  nearend_mic_to_playback_ratio: 1.15
+  nearend_frames_required: 4
+  startup_grace_ms: 300
 ```
 
 **Fine-tuning Process:**
 ```bash
-# 1. Run detector to measure baseline noise
-python -m src.audio.barge_in_detector
+# 1. Calibrate and write candidate values
+python scripts/calibrate_aec.py --duration 5 --write-config
 
-# 2. Observe noise energy levels
-# 3. Adjust threshold to 3-5x noise level
-# 4. Test by speaking during robot speech
+# 2. Validate barge-in baseline
+python scripts/test_bargein.py
+
+# 3. Stress-test loop
+python scripts/test_pipeline.py --continuous
+```
+
+If false interruptions remain, tighten near-end gate first:
+
+```yaml
+barge_in:
+  nearend_mic_to_playback_ratio: 1.25
+  nearend_frames_required: 5
+  startup_grace_ms: 380
 ```
 
 ### 4.3 LLM Model Selection

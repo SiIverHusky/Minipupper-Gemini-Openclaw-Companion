@@ -39,6 +39,10 @@ barge_in:
   aec_double_talk_ratio: 1.2  # Keep near-end speech when user is louder than speaker bleed
   echo_suppression_threshold: 0.7
   echo_energy_ratio: 0.219
+  nearend_min_cleaned_rms: 300.0
+  nearend_mic_to_playback_ratio: 1.15
+  nearend_frames_required: 4
+  startup_grace_ms: 300
 
 # Operator Mode Settings
 operator:

@@ -48,6 +48,10 @@ class AudioConfig:
     barge_in_aec_double_talk_ratio: float = 1.4
     barge_in_echo_suppression_threshold: float = 0.80
     barge_in_echo_energy_ratio: float = 0.45
+    barge_in_nearend_min_cleaned_rms: float = 300.0
+    barge_in_nearend_mic_to_playback_ratio: float = 1.15
+    barge_in_nearend_frames_required: int = 4
+    barge_in_startup_grace_ms: int = 300
     asr_engine: str = "google"  # "google" or "whisper"
     asr_model: str = "base"  # For whisper fallback
     asr_device: str = "cpu"  # For whisper fallback
@@ -111,6 +115,10 @@ class AudioManager:
             aec_double_talk_ratio=config.barge_in_aec_double_talk_ratio,
             echo_suppression_threshold=config.barge_in_echo_suppression_threshold,
             echo_energy_ratio=config.barge_in_echo_energy_ratio,
+            nearend_min_cleaned_rms=config.barge_in_nearend_min_cleaned_rms,
+            nearend_mic_to_playback_ratio=config.barge_in_nearend_mic_to_playback_ratio,
+            nearend_frames_required=config.barge_in_nearend_frames_required,
+            startup_grace_ms=config.barge_in_startup_grace_ms,
         )
         self.barge_in = BargeInDetector(barge_in_config)
         

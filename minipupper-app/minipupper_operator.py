@@ -119,6 +119,22 @@ class MinipupperOperator:
                 'BARGE_IN_ECHO_ENERGY_RATIO',
                 barge_in_settings.get('echo_energy_ratio', 0.45),
             )),
+            barge_in_nearend_min_cleaned_rms=float(os.getenv(
+                'BARGE_IN_NEAREND_MIN_CLEANED_RMS',
+                barge_in_settings.get('nearend_min_cleaned_rms', 300.0),
+            )),
+            barge_in_nearend_mic_to_playback_ratio=float(os.getenv(
+                'BARGE_IN_NEAREND_MIC_TO_PLAYBACK_RATIO',
+                barge_in_settings.get('nearend_mic_to_playback_ratio', 1.15),
+            )),
+            barge_in_nearend_frames_required=self._get_int_setting(
+                'BARGE_IN_NEAREND_FRAMES_REQUIRED',
+                barge_in_settings.get('nearend_frames_required', 4),
+            ),
+            barge_in_startup_grace_ms=self._get_int_setting(
+                'BARGE_IN_STARTUP_GRACE_MS',
+                barge_in_settings.get('startup_grace_ms', 300),
+            ),
             asr_engine=os.getenv('ASR_ENGINE', asr_settings.get('engine', 'google')),
             asr_model=os.getenv('WHISPER_MODEL', asr_settings.get('model', 'base')),
             asr_device=os.getenv('WHISPER_DEVICE', asr_settings.get('device', 'cpu')),

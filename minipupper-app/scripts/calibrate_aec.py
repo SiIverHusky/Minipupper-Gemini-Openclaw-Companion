@@ -24,6 +24,11 @@ def _load_yaml(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _write_yaml(path: Path, content: dict) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(content, f, sort_keys=False)
+
+
 def _generate_probe(sample_rate: int, duration_s: float, seed: int = 42) -> np.ndarray:
     rng = np.random.default_rng(seed)
     n = int(sample_rate * duration_s)
@@ -133,10 +138,18 @@ def _recommend(
     gain: float,
     sims: np.ndarray,
     ratios: np.ndarray,
+    cleaned_rms: np.ndarray,
+    frame_ms: int,
 ) -> dict:
     sim90 = float(np.percentile(sims, 90)) if sims.size else 0.80
     ratio80 = float(np.percentile(ratios, 80)) if ratios.size else 0.45
     ratio95 = float(np.percentile(ratios, 95)) if ratios.size else 0.9
+    cleaned95 = float(np.percentile(cleaned_rms, 95)) if cleaned_rms.size else 250.0
+
+    nearend_min_cleaned = float(np.clip(cleaned95 * 1.35, 120.0, 1200.0))
+    nearend_ratio = float(np.clip(ratio95 * 1.08, 1.05, 2.20))
+    nearend_frames_required = int(np.clip(np.ceil(120.0 / frame_ms), 3, 7))
+    startup_grace_ms = int(np.clip(np.ceil(delay_ms + 180.0), 220, 800))
 
     return {
         "aec_enabled": True,
@@ -145,7 +158,36 @@ def _recommend(
         "aec_double_talk_ratio": round(float(np.clip(ratio95 + 0.25, 1.2, 2.2)), 3),
         "echo_suppression_threshold": round(float(np.clip(sim90 + 0.04, 0.70, 0.97)), 3),
         "echo_energy_ratio": round(float(np.clip(ratio80 * 1.1, 0.20, 0.90)), 3),
+        "nearend_min_cleaned_rms": round(nearend_min_cleaned, 1),
+        "nearend_mic_to_playback_ratio": round(nearend_ratio, 3),
+        "nearend_frames_required": nearend_frames_required,
+        "startup_grace_ms": startup_grace_ms,
     }
+
+
+def _frame_rms(x: np.ndarray, sample_rate: int, frame_ms: int) -> np.ndarray:
+    frame_len = int(sample_rate * frame_ms / 1000)
+    if frame_len <= 0 or x.size < frame_len:
+        return np.array([], dtype=np.float32)
+    out = []
+    for i in range(0, x.size - frame_len + 1, frame_len):
+        out.append(_rms(x[i : i + frame_len]))
+    return np.array(out, dtype=np.float32)
+
+
+def _quality_label(gain: float, sims: np.ndarray, erle_db: float) -> tuple[str, str]:
+    sim95 = float(np.percentile(sims, 95)) if sims.size else 0.0
+    if gain < 0.03 or sim95 < 0.25:
+        return (
+            "low",
+            "Weak playback-to-mic coupling detected; calibration may be unreliable. Increase speaker volume or verify correct input/output devices.",
+        )
+    if erle_db < 2.0:
+        return (
+            "medium",
+            "Echo path detected but cancellation headroom is limited; values are usable but may need manual tightening.",
+        )
+    return ("high", "Calibration quality looks good.")
 
 
 def main() -> int:
@@ -158,6 +200,7 @@ def main() -> int:
     parser.add_argument("--output-device", type=int, default=int(os.getenv("SPEAKER_DEVICE_INDEX", os.getenv("AUDIO_DEVICE_INDEX", "-1"))))
     parser.add_argument("--max-delay-ms", type=int, default=300, help="Max echo delay search window")
     parser.add_argument("--frame-ms", type=int, default=30, choices=[10, 20, 30], help="Frame size for frame metrics")
+    parser.add_argument("--write-config", action="store_true", help="Write recommended values back to config YAML")
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
@@ -205,12 +248,16 @@ def main() -> int:
     erle_db = 10.0 * np.log10((np.var(mic_aligned) + 1e-9) / (np.var(residual) + 1e-9))
 
     sims, ratios = _frame_metrics(mic_aligned, ref_aligned, args.sample_rate, args.frame_ms)
-    rec = _recommend(delay_ms, gain, sims, ratios)
+    cleaned_rms = _frame_rms(residual, args.sample_rate, args.frame_ms)
+    rec = _recommend(delay_ms, gain, sims, ratios, cleaned_rms, args.frame_ms)
+    quality, quality_msg = _quality_label(gain, sims, erle_db)
 
     print("\nCalibration results:")
     print(f"estimated_delay_ms: {delay_ms:.1f}")
     print(f"estimated_gain: {gain:.3f}")
     print(f"estimated_erle_db: {erle_db:.2f}")
+    print(f"calibration_quality: {quality}")
+    print(f"quality_note: {quality_msg}")
 
     print("\nRecommended barge_in settings:")
     print("barge_in:")
@@ -220,6 +267,10 @@ def main() -> int:
     print(f"  aec_double_talk_ratio: {rec['aec_double_talk_ratio']}")
     print(f"  echo_suppression_threshold: {rec['echo_suppression_threshold']}")
     print(f"  echo_energy_ratio: {rec['echo_energy_ratio']}")
+    print(f"  nearend_min_cleaned_rms: {rec['nearend_min_cleaned_rms']}")
+    print(f"  nearend_mic_to_playback_ratio: {rec['nearend_mic_to_playback_ratio']}")
+    print(f"  nearend_frames_required: {rec['nearend_frames_required']}")
+    print(f"  startup_grace_ms: {rec['startup_grace_ms']}")
 
     current = (cfg.get("barge_in") or {}) if isinstance(cfg, dict) else {}
     if current:
@@ -231,9 +282,21 @@ def main() -> int:
             "aec_double_talk_ratio",
             "echo_suppression_threshold",
             "echo_energy_ratio",
+            "nearend_min_cleaned_rms",
+            "nearend_mic_to_playback_ratio",
+            "nearend_frames_required",
+            "startup_grace_ms",
         ]:
             if key in current:
                 print(f"  {key}: {current[key]}")
+
+    if args.write_config:
+        if not isinstance(cfg, dict):
+            cfg = {}
+        cfg.setdefault("barge_in", {})
+        cfg["barge_in"].update(rec)
+        _write_yaml(cfg_path, cfg)
+        print(f"\nWrote recommended settings to {cfg_path}")
 
     print("\nTip: run this while no one is speaking near the mic for best echo profiling.")
     return 0
