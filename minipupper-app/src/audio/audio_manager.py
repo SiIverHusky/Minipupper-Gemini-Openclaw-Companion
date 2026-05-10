@@ -131,6 +131,8 @@ class AudioManager:
         self.on_speech_start: Optional[Callable] = None
         self.on_speech_end: Optional[Callable] = None
         self.on_interrupted: Optional[Callable] = None
+        # Throttle repeated audio error logs
+        self._last_audio_error_time = 0.0
     
     def _fallback_to_whisper(self, config: AudioConfig):
         """Fallback to Whisper if Google Cloud Speech unavailable"""
@@ -174,6 +176,129 @@ class AudioManager:
         
         self.logger.error("No ASR engine available")
         return ""
+    
+    def listen(self, timeout_seconds: int = 30) -> str:
+        """
+        Listen for speech from microphone and transcribe it.
+        
+        Records audio until silence is detected or timeout is reached.
+        
+        Args:
+            timeout_seconds: Max time to listen
+            
+        Returns:
+            Transcribed text, empty string if no speech detected
+        """
+        import tempfile
+        import webrtcvad
+        
+        self.logger.debug("Listening for speech...")
+        
+        # Create temp file for audio
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as f:
+            temp_path = f.name
+        
+        try:
+            # Create VAD detector
+            vad = webrtcvad.Vad(self.config.barge_in_vad_aggressiveness)
+            
+            # Record audio with pre-roll buffer and VAD-based end-of-speech detection
+            silence_frames = 0
+            max_silence_frames = max(1, int(self.config.barge_in_silence_duration_ms / self.config.barge_in_frame_duration_ms))
+            pre_roll_frames = max(1, int(0.3 / (self.config.barge_in_frame_duration_ms / 1000.0)))
+
+            device = None if self.config.input_device < 0 else int(self.config.input_device)
+            frame_samples = int(self.config.sample_rate * self.config.barge_in_frame_duration_ms / 1000)
+
+            from collections import deque
+            pre_buffer = deque(maxlen=pre_roll_frames)
+            audio_frames = []
+
+            with sd.InputStream(samplerate=self.config.sample_rate,
+                               channels=self.config.channels,
+                               dtype='int16',
+                               device=device,
+                               blocksize=frame_samples) as stream:
+
+                start_time = time.time()
+                speech_started = False
+
+                while True:
+                    # Check timeout
+                    if time.time() - start_time > timeout_seconds:
+                        self.logger.debug("Listen timeout reached")
+                        break
+
+                    # Read frame
+                    try:
+                        frame, _ = stream.read(frame_samples)
+                    except Exception:
+                        break
+
+                    frame_bytes = frame.astype(np.int16).tobytes()
+
+                    # Feed the same mic frame into the barge-in detector when armed.
+                    self.barge_in.process_mic_frame(frame_bytes)
+
+                    # VAD decision
+                    try:
+                        is_speech = vad.is_speech(frame_bytes, self.config.sample_rate)
+                    except Exception:
+                        is_speech = False
+
+                    if not speech_started:
+                        # keep pre-roll until speech is detected
+                        pre_buffer.append(frame)
+                        if is_speech:
+                            speech_started = True
+                            # start with pre-roll content
+                            audio_frames.extend(list(pre_buffer))
+                            pre_buffer.clear()
+                            silence_frames = 0
+                            self.logger.debug("Speech started")
+                    else:
+                        audio_frames.append(frame)
+                        if is_speech:
+                            silence_frames = 0
+                        else:
+                            silence_frames += 1
+                            if silence_frames >= max_silence_frames:
+                                self.logger.debug("Speech ended (silence detected)")
+                                break
+            
+            # Save to temp WAV file
+            if audio_frames:
+                combined = np.concatenate(audio_frames, axis=0)
+                sf.write(temp_path, combined, self.config.sample_rate)
+
+                # Transcribe
+                transcript = self.transcribe_audio(temp_path)
+                if transcript and transcript.strip():
+                    self.logger.info(f"Transcribed: {transcript}")
+                else:
+                    # keep empty transcriptions out of INFO logs
+                    self.logger.debug("Transcribed: (empty)")
+                return transcript
+            else:
+                self.logger.debug("No audio captured")
+                return ""
+                
+        except Exception as e:
+            # Throttle repeated low-level audio errors to avoid log spam
+            now = time.time()
+            if now - self._last_audio_error_time > 10.0:
+                self.logger.error(f"Listen error: {e}")
+                self._last_audio_error_time = now
+            else:
+                self.logger.debug(f"Listen transient error: {e}")
+            return ""
+        finally:
+            # Cleanup temp file
+            try:
+                import os
+                os.unlink(temp_path)
+            except Exception:
+                pass
     
     def _transcribe_google_cloud(self, audio_path: str) -> str:
         """Transcribe using Google Cloud Speech-to-Text"""
@@ -389,6 +514,10 @@ class AudioManager:
 
             if self.on_speech_end:
                 self.on_speech_end()
+
+    def interrupt_speech(self):
+        """Request interruption of any currently playing speech."""
+        self._interrupt_event.set()
     
     def shutdown(self):
         """Cleanup resources"""

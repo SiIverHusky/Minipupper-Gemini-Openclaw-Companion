@@ -6,7 +6,6 @@ Last Updated: 2026-05-10
 
 import audioop
 import logging
-import queue
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -68,7 +67,6 @@ class BargeInDetector:
             raise ValueError("frame_duration_ms must be 10, 20, or 30 for WebRTC VAD")
 
         self._vad = webrtcvad.Vad(int(self.config.vad_aggressiveness))
-        self._audio_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=32)
         self._playback_queue: deque[bytes] = deque(maxlen=12)
         self._frame_bytes = int(self.config.sample_rate * self.config.frame_duration_ms / 1000) * 2
         self._speech_frames_needed = max(1, int(self.config.detection_timeout_ms / self.config.frame_duration_ms))
@@ -85,7 +83,6 @@ class BargeInDetector:
         self._frames_since_start = 0
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._stream: Optional[sd.InputStream] = None
 
         self.on_barge_in: Optional[Callable[[], None]] = None
 
@@ -238,16 +235,8 @@ class BargeInDetector:
         self._nearend_frames = 0
         self._frames_since_start = 0
         self._stop_event.clear()
-
-        while not self._audio_queue.empty():
-            try:
-                self._audio_queue.get_nowait()
-            except queue.Empty:
-                break
-
-        self._thread = threading.Thread(target=self._detection_loop, daemon=True)
-        self._thread.start()
-        self.logger.debug("Barge-in detector started")
+        self._playback_queue.clear()
+        self.logger.debug("Barge-in detector armed")
 
     def stop_listening(self):
         """Stop monitoring for barge-in."""
@@ -257,132 +246,42 @@ class BargeInDetector:
         self.is_listening = False
         self._stop_event.set()
 
-        if self._stream:
-            try:
-                self._stream.stop()
-                self._stream.close()
-            except Exception:
-                pass
-            self._stream = None
+        self.logger.debug("Barge-in detector disarmed")
 
-        if self._thread:
-            self._thread.join(timeout=2.0)
-            self._thread = None
+    def process_mic_frame(self, frame_bytes: bytes):
+        """Process a microphone frame coming from the shared ASR input stream.
 
-        self.logger.debug("Barge-in detector stopped")
-
-    def _stream_callback(self, indata, frames, time_info, status):
-        if status:
-            self.logger.debug("Barge-in input status: %s", status)
-
-        if self._stop_event.is_set():
+        The ASR pipeline remains the only reader of the physical mic. When
+        barge-in is armed, this method consumes the same frames to detect near-end
+        speech during TTS playback and trigger interruption.
+        """
+        if not self.is_listening or self._stop_event.is_set() or not frame_bytes:
             return
 
-        try:
-            audio_bytes = indata.tobytes()
+        if self.config.channels > 1:
             try:
-                self._audio_queue.put_nowait(audio_bytes)
-            except queue.Full:
-                try:
-                    self._audio_queue.get_nowait()
-                except queue.Empty:
-                    pass
-                self._audio_queue.put_nowait(audio_bytes)
-        except Exception as exc:
-            self.logger.error("Barge-in stream callback error: %s", exc)
+                frame_bytes = audioop.tomono(frame_bytes, 2, 1.0, 0.0)
+            except Exception:
+                pass
 
-    def _detection_loop(self):
-        """Consume mic frames and trigger on voiced speech."""
-        try:
-            device = None if self.config.input_device < 0 else self.config.input_device
-            blocksize = int(self.config.sample_rate * self.config.frame_duration_ms / 1000)
+        if len(frame_bytes) != self._frame_bytes:
+            if len(frame_bytes) < self._frame_bytes:
+                frame_bytes = frame_bytes + (b"\x00" * (self._frame_bytes - len(frame_bytes)))
+            else:
+                frame_bytes = frame_bytes[: self._frame_bytes]
 
-            self._stream = sd.InputStream(
-                channels=self.config.channels,
-                samplerate=self.config.sample_rate,
-                blocksize=blocksize,
-                dtype="int16",
-                device=device,
-                latency="low",
-                callback=self._stream_callback,
-            )
+        cleaned_frame = self._apply_reference_aec(frame_bytes)
+        self._frames_since_start += 1
 
-            with self._stream:
-                while self.is_listening and not self._stop_event.is_set():
-                    try:
-                        frame = self._audio_queue.get(timeout=0.2)
-                    except queue.Empty:
-                        continue
+        self.energy_history.append(float(audioop.rms(cleaned_frame, 2)))
 
-                    if not frame:
-                        continue
+        # AEC-only mode: keep playback history and cleaned energy updated, but do
+        # not trigger callbacks or interrupt TTS on VAD speech detection.
+        if self._is_likely_echo(frame_bytes):
+            self._silence_frames += 1
+            return
 
-                    if self.config.channels > 1:
-                        frame = audioop.tomono(frame, 2, 1.0, 0.0)
-
-                    if len(frame) != self._frame_bytes:
-                        if len(frame) < self._frame_bytes:
-                            frame = frame + (b"\x00" * (self._frame_bytes - len(frame)))
-                        else:
-                            frame = frame[: self._frame_bytes]
-
-                    cleaned_frame = self._apply_reference_aec(frame)
-                    self._frames_since_start += 1
-
-                    energy = audioop.rms(cleaned_frame, 2)
-                    self.energy_history.append(float(energy))
-
-                    is_speech = self._vad.is_speech(cleaned_frame, self.config.sample_rate)
-
-                    if is_speech and self._is_likely_echo(frame):
-                        self.logger.debug(
-                            "Suppressed likely speaker echo (similarity above threshold)"
-                        )
-                        self._speech_frames = 0
-                        self._nearend_frames = 0
-                        self._silence_frames += 1
-                        continue
-
-                    startup_frames = max(1, int(self.config.startup_grace_ms / self.config.frame_duration_ms))
-                    if self._frames_since_start <= startup_frames:
-                        self._speech_frames = 0
-                        self._nearend_frames = 0
-                        self._silence_frames += 1
-                        continue
-
-                    nearend_ok = self._nearend_gate(frame, cleaned_frame)
-
-                    if is_speech and nearend_ok:
-                        self._speech_frames += 1
-                        self._nearend_frames += 1
-                        self._silence_frames = 0
-                    else:
-                        self._nearend_frames = 0
-                        self._silence_frames += 1
-
-                    if (
-                        not self.speech_detected
-                        and self._speech_frames >= self._speech_frames_needed
-                        and self._nearend_frames >= int(self.config.nearend_frames_required)
-                    ):
-                        self.speech_detected = True
-                        self.logger.info(
-                            "Speech detected by VAD (speech_frames=%s, silence_frames=%s)",
-                            self._speech_frames,
-                            self._silence_frames,
-                        )
-                        if self.on_barge_in:
-                            self.on_barge_in()
-
-                    if self.speech_detected and self._silence_frames >= self._silence_frames_needed:
-                        self.speech_detected = False
-                        self._speech_frames = 0
-                        self._nearend_frames = 0
-                        self._silence_frames = 0
-                        self.logger.debug("VAD silence detected - reset")
-
-        except Exception as exc:
-            self.logger.error("Failed to initialize audio stream: %s", exc)
+        self._silence_frames = 0
 
     def get_energy_level(self) -> float:
         """Get current audio energy level (normalized estimate)."""

@@ -10,7 +10,10 @@ import sys
 import yaml
 import threading
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+import time
+import re
+from dataclasses import dataclass, field
 
 try:
     from dotenv import load_dotenv
@@ -18,12 +21,14 @@ except ImportError:
     load_dotenv = None
 
 from src.core.task_queue import (
-    input_text_queue, output_text_queue, barge_in_detected,
+    input_text_queue, output_text_queue,
     speech_active, movement_queue, status_queue, control_queue
 )
+from src.core.task_queue import openclaw_queue
 from src.audio.audio_manager import AudioManager, AudioConfig
 from src.audio.barge_in_detector import BargeInConfig
 from src.core.llm_engine import create_llm_provider, Message
+from src.openclaw.client import OpenClawClient, load_device_identity
 
 # Setup logging
 logging.basicConfig(
@@ -155,10 +160,13 @@ class MinipupperOperator:
         self.is_running = False
         self.current_state = "idle"
         self.conversation_history = []
+        self.checkpoint = None
         
         # Thread pool
         self._worker_threads = []
         self._stop_event = threading.Event()
+        self._interrupt_requested = threading.Event()
+        self.gateway_client: Optional[OpenClawClient] = None
         
         self.logger.info("Minipupper Operator initialized")
         
@@ -270,6 +278,15 @@ class MinipupperOperator:
         )
         control_thread.start()
         self._worker_threads.append(control_thread)
+
+        # Gateway Worker - connect to OpenClaw Gateway and receive snapshots
+        gw_thread = threading.Thread(
+            target=self._gateway_worker,
+            daemon=True,
+            name="GatewayWorker"
+        )
+        gw_thread.start()
+        self._worker_threads.append(gw_thread)
     
     def _asr_worker(self):
         """Worker: Speech-to-text processing"""
@@ -277,11 +294,65 @@ class MinipupperOperator:
         
         while self.is_running:
             try:
-                # TODO: Implement continuous audio capture
-                # For now, wait for manual input
-                pass
+                # Continuously listen for speech
+                transcript = self.audio_manager.listen()
+                
+                if transcript and transcript.strip():
+                    self.logger.info(f"ASR: {transcript}")
+
+                    # Explicit interrupt commands (user telling the robot to stop)
+                    try:
+                        if self._is_interrupt_command(transcript):
+                            self.logger.info("Interrupt command detected from ASR: %s", transcript)
+                            # Signal audio manager to stop playback immediately
+                            try:
+                                self.audio_manager.interrupt_speech()
+                            except Exception:
+                                pass
+                            # mark internal interrupt flag for any other consumers
+                            try:
+                                self._interrupt_requested.set()
+                            except Exception:
+                                pass
+                            # Do not enqueue interrupt phrases as user input
+                            continue
+                    except Exception:
+                        pass
+
+                    # If currently speaking, and the transcript is not speaker-bleed,
+                    # treat this as user speech and interrupt playback so the user can take over.
+                    try:
+                        speaking = getattr(self.audio_manager, '_is_speaking', False)
+                        if speaking and not self._is_likely_speaker_bleed(transcript):
+                            self.logger.info("User speech detected during playback — interrupting: %s", transcript)
+                            try:
+                                self.audio_manager.interrupt_speech()
+                            except Exception:
+                                pass
+                            try:
+                                self._interrupt_requested.set()
+                            except Exception:
+                                pass
+                            # Continue to enqueue the user transcript for processing
+                    except Exception:
+                        pass
+
+                    # Detect speaker-bleed: if the transcript is essentially verbatim
+                    # from the last assistant response, drop it to avoid treating
+                    # the robot's own speech as user input.
+                    try:
+                        if self._is_likely_speaker_bleed(transcript):
+                            self.logger.debug("Dropped ASR transcript (likely speaker-bleed): %s", transcript)
+                            continue
+                    except Exception:
+                        # If bleed detection fails for any reason, fallback to enqueue
+                        pass
+
+                    input_text_queue.put(transcript)
+                        
             except Exception as e:
                 self.logger.error(f"ASR Worker error: {e}")
+                time.sleep(1.0)
     
     def _operator_worker(self):
         """Worker: Process input and generate responses"""
@@ -292,23 +363,219 @@ class MinipupperOperator:
                 # Check for input text
                 try:
                     text = input_text_queue.get(timeout=1.0)
-                except:
+                except Exception:
                     continue
+
+                self.logger.info(f"Operator processing: {text}")
+                self.current_state = "processing"
+                self._broadcast_status("Processing your request...")
                 
-                # Process and respond
+                # Send to OpenClaw Gateway if available
+                if self.gateway_client and self.gateway_client.ws:
+                    try:
+                        self.gateway_client.send_sessions_send("main", text)
+                        self.logger.info("Sent message to OpenClaw Gateway")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to send to Gateway: {e}")
+                
+                # Also generate local response in parallel
                 response = self._process_user_input(text)
                 
                 if response:
+                    # Log generated response text at INFO so operator output is visible
+                    try:
+                        self.logger.info("Generated response (%d chars): %s", len(response), response)
+                    except Exception:
+                        # Fallback if message too large for formatting
+                        self.logger.info("Generated response (%d chars)", len(response))
                     output_text_queue.put(response)
                     
                     # Speak response with barge-in support
-                    if self.config['audio']['tts']['engine'] == 'google':
+                    try:
                         interrupted = not self.audio_manager.speak(response)
                         if interrupted:
-                            self._broadcast_status("Speech interrupted by user")
+                            self.logger.info("Speech playback stopped")
+                            self._broadcast_status("Speech playback stopped")
+                    except Exception as e:
+                        self.logger.error(f"TTS Error: {e}")
+                
+                self.current_state = "idle"
                     
             except Exception as e:
                 self.logger.error(f"Operator Worker error: {e}")
+                self.current_state = "idle"
+                time.sleep(0.5)
+
+    def _gateway_worker(self):
+        """Worker: maintain connection to OpenClaw Gateway and forward frames."""
+        self.logger.info("Gateway Worker started")
+        network_cfg = self.config.get('network', {})
+        if not network_cfg.get('tailscale_enabled', False):
+            self.logger.info("Tailscale disabled; skipping Gateway Worker")
+            return
+
+        gateway_url = os.getenv('OPENCLAW_GATEWAY_URL') or network_cfg.get('gateway_url')
+        if not gateway_url:
+            self.logger.warning("No gateway_url configured; skipping Gateway Worker")
+            return
+
+        # Load device identity if available
+        device_id = load_device_identity().get('id')
+        self.gateway_client = OpenClawClient(gateway_url, device_id=device_id)
+
+        def handler(frame: dict):
+            try:
+                openclaw_queue.put(frame, timeout=0.1)
+            except Exception:
+                pass
+
+        try:
+            try:
+                self.gateway_client.start(handler)
+            except Exception as e:
+                # Likely missing dependency (websocket-client) or startup failure.
+                # Log once and disable gateway integration without crashing the thread.
+                logger.warning(f"Gateway client could not start: {e}")
+                self.gateway_client = None
+                return
+
+            # keep alive until stop requested
+            while self.is_running and not self._stop_event.is_set():
+                # Drain openclaw frames and make lightweight decisions here
+                try:
+                    frame = openclaw_queue.get(timeout=1.0)
+                except Exception:
+                    continue
+
+                try:
+                    self._handle_openclaw_frame(frame)
+                except Exception:
+                    continue
+
+        finally:
+            if self.gateway_client:
+                self.gateway_client.stop()
+
+    @dataclass
+    class Checkpoint:
+        phase: str = ""
+        last_transcript: str = ""
+        last_agent_response: str = ""
+        last_agent_response_at: float = 0.0
+        last_status_announced: str = ""
+        last_status_at: float = 0.0
+        agent_processing_started_at: float = 0.0
+        agent_processing_seconds: float = 0.0
+        pending_barge_in: bool = False
+        error_count: int = 0
+        gateway_connected: bool = False
+        last_gateway_disconnect_at: float = 0.0
+        progress: float = 0.0
+        raw: dict = field(default_factory=dict)
+
+    def _is_significant_update(self, old: Optional['MinipupperOperator.Checkpoint'], new: 'MinipupperOperator.Checkpoint') -> bool:
+        """Decide whether new checkpoint represents a significant update to announce.
+
+        Heuristic: phase change, progress increased >=10%, or status text changed.
+        Completion (progress>=100 or phase=="finished") is always significant.
+        """
+        if old is None:
+            return True
+
+        if new.phase and new.phase != old.phase:
+            return True
+
+        # completion
+        if (new.phase and new.phase.lower() in ("finished", "complete", "done")) or new.progress >= 100.0:
+            if old.progress < 100.0:
+                return True
+
+        # progress jump
+        try:
+            if new.progress - old.progress >= 10.0:
+                return True
+        except Exception:
+            pass
+
+        # status text changed
+        if new.last_agent_response and new.last_agent_response != old.last_agent_response:
+            return True
+
+        return False
+
+    def _handle_openclaw_frame(self, frame: dict):
+        """Process raw frame from OpenClaw Gateway and potentially announce via LLM."""
+        # Build a minimal checkpoint from the frame
+        cp = MinipupperOperator.Checkpoint()
+        cp.raw = frame
+        cp.gateway_connected = True
+        cp.last_status_at = time.time()
+
+        # Try to extract common fields
+        payload = frame.get('payload', {}) if isinstance(frame, dict) else {}
+        # session.message -> assistant content
+        if frame.get('event') == 'session.message':
+            msg = payload.get('message', {})
+            role = msg.get('role')
+            content = msg.get('content')
+            if role == 'assistant' and content:
+                cp.last_agent_response = content
+                # try to detect progress like "progress: 42%" or numeric
+                # naive parse: look for pattern "%" in content
+                try:
+                    if '%' in content:
+                        # extract first number before %
+                        import re
+                        m = re.search(r"(\d{1,3})%", content)
+                        if m:
+                            cp.progress = float(m.group(1))
+                except Exception:
+                    pass
+
+        # Some frames may include explicit status/progress fields
+        if isinstance(payload, dict):
+            if 'status' in payload:
+                cp.last_agent_response = str(payload.get('status'))
+            if 'progress' in payload:
+                try:
+                    cp.progress = float(payload.get('progress') or 0.0)
+                except Exception:
+                    pass
+            if 'phase' in payload:
+                cp.phase = str(payload.get('phase'))
+
+        significant = self._is_significant_update(self.checkpoint, cp)
+        # update stored checkpoint
+        self.checkpoint = cp
+
+        if not significant:
+            return
+
+        # Build an announcement via LLM to be concise and friendly
+        try:
+            prompt = [
+                Message(role='system', content='You are a concise status announcer for a robot operator.'),
+                Message(role='user', content=f"Summarize this status update briefly for a user: {cp.last_agent_response or cp.phase or cp.progress}")
+            ]
+            announcement = self.llm.generate_response(messages=prompt, max_tokens=80)
+        except Exception:
+            # Fallback to raw text
+            if cp.last_agent_response:
+                announcement = cp.last_agent_response
+            elif cp.phase:
+                announcement = f"Task phase: {cp.phase}"
+            else:
+                announcement = f"Progress: {cp.progress}%"
+
+        # Enqueue for speech and status display
+        try:
+            output_text_queue.put(announcement)
+        except Exception:
+            pass
+        try:
+            status_queue.put(announcement)
+        except Exception:
+            pass
     
     def _movement_worker(self):
         """Worker: Execute movement commands"""
@@ -350,6 +617,7 @@ class MinipupperOperator:
                     
             except Exception as e:
                 self.logger.error(f"Control Worker error: {e}")
+
     
     def _process_user_input(self, text: str) -> str:
         """
@@ -409,6 +677,84 @@ class MinipupperOperator:
         start_idx = max(0, len(self.conversation_history) - max_messages)
         
         return self.conversation_history[start_idx:]
+
+    def _is_likely_speaker_bleed(self, transcript: str) -> bool:
+        """
+        Heuristic: returns True when the ASR `transcript` appears to be
+        a verbatim (or nearly verbatim) echo of the last assistant message.
+
+        Method:
+        - Find the most recent assistant message in `conversation_history`.
+        - Normalize both strings (lowercase, strip punctuation).
+        - Compute token coverage: fraction of transcript tokens present in assistant tokens.
+        - If coverage >= 0.95 and transcript has >= 3 tokens, consider it bleed.
+        - Also treat as bleed when the cleaned transcript is a substring of the assistant text
+          (useful for short repeats) with >=2 tokens.
+        """
+        if not transcript:
+            return False
+
+        # find last assistant message
+        last_assistant = None
+        for msg in reversed(self.conversation_history):
+            if getattr(msg, 'role', None) == 'assistant' and getattr(msg, 'content', None):
+                last_assistant = msg.content
+                break
+
+        if not last_assistant:
+            return False
+
+        def _clean(s: str) -> str:
+            return re.sub(r"[^\w\s]", "", s.lower()).strip()
+
+        t_clean = _clean(transcript)
+        a_clean = _clean(last_assistant)
+
+        if not t_clean:
+            return False
+
+        t_tokens = t_clean.split()
+        a_tokens = set(a_clean.split())
+
+        if not t_tokens:
+            return False
+
+        # token coverage
+        matched = sum(1 for tok in t_tokens if tok in a_tokens)
+        coverage = matched / float(len(t_tokens))
+
+        if len(t_tokens) >= 3 and coverage >= 0.95:
+            return True
+
+        # substring check for shorter transcripts
+        if len(t_tokens) >= 2 and t_clean in a_clean:
+            return True
+
+        return False
+
+    def _is_interrupt_command(self, transcript: str) -> bool:
+        """
+        Heuristic to detect short explicit user interrupt phrases.
+        Returns True for clear short commands like "stop", "cancel", "that's enough", etc.
+        """
+        if not transcript:
+            return False
+
+        t = re.sub(r"[^\w\s]", "", transcript.lower()).strip()
+        if not t:
+            return False
+
+        # exact phrases
+        phrases = {"stop", "cancel", "cancel output", "thats enough", "that's enough", "stop that", "interrupt", "abort", "never mind"}
+        if t in phrases:
+            return True
+
+        tokens = t.split()
+        # single-word interrupts
+        if len(tokens) <= 3 and tokens and tokens[0] in {"stop", "cancel", "abort", "interrupt"}:
+            return True
+
+        return False
     
     def _execute_movement(self, command: str):
         """
@@ -480,16 +826,21 @@ def main():
     
     try:
         operator.start()
+        logger.info("✓ Minipupper Operator running. Listening for speech...")
+        logger.info("Press Ctrl+C to stop.")
         
-        # Keep running
-        import time
-        while True:
-            time.sleep(1)
+        # Keep running and wait for signals
+        while operator.is_running:
+            time.sleep(0.5)
             
     except KeyboardInterrupt:
-        logger.info("Received shutdown signal")
+        logger.info("\nReceived shutdown signal")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
     finally:
+        logger.info("Shutting down...")
         operator.stop()
+        logger.info("Operator stopped")
 
 
 if __name__ == "__main__":
