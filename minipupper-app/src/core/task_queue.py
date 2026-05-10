@@ -33,6 +33,9 @@ movement_queue = queue.Queue()
 # Status updates: Human-readable status strings
 status_queue = queue.Queue()
 
+# OpenClaw raw frames / snapshots
+openclaw_queue = queue.Queue()
+
 # Control commands: System control (shutdown, restart, etc)
 control_queue = queue.Queue()
 

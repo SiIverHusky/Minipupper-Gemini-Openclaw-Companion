@@ -27,3 +27,7 @@ webrtcvad>=2.0.10
 # Utilities
 pyyaml>=6.0
 requests>=2.31.0
+
+# OpenClaw / Gateway
+websocket-client>=1.6.0
+cryptography>=40.0.0

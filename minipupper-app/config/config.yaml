@@ -69,6 +69,9 @@ operator:
 network:
   # Tailscale connectivity
   tailscale_enabled: true
+  # OpenClaw Gateway URL (wss://host:443)
+  # Read from OPENCLAW_GATEWAY_URL environment variable
+  gateway_url: "${OPENCLAW_GATEWAY_URL}"
   
   # Fallback local connectivity
   local_network: true

@@ -370,15 +370,19 @@ class MinipupperOperator:
                 self.current_state = "processing"
                 self._broadcast_status("Processing your request...")
                 
-                # Send to OpenClaw Gateway if available
-                if self.gateway_client and self.gateway_client.ws:
+                # Route to OpenClaw Gateway if connected
+                if self.gateway_client and self.gateway_client.is_connected:
                     try:
                         self.gateway_client.send_sessions_send("main", text)
                         self.logger.info("Sent message to OpenClaw Gateway")
+                        # Response will arrive via Gateway session.message event
+                        # handled by _handle_openclaw_frame → TTS
+                        self.current_state = "idle"
+                        continue
                     except Exception as e:
                         self.logger.warning(f"Failed to send to Gateway: {e}")
                 
-                # Also generate local response in parallel
+                # Fallback: generate local response via Gemini LLM
                 response = self._process_user_input(text)
                 
                 if response:
@@ -420,8 +424,8 @@ class MinipupperOperator:
             return
 
         # Load device identity if available
-        device_id = load_device_identity().get('id')
-        self.gateway_client = OpenClawClient(gateway_url, device_id=device_id)
+        device_identity = load_device_identity()
+        self.gateway_client = OpenClawClient(gateway_url, device_identity=device_identity)
 
         def handler(frame: dict):
             try:
@@ -567,15 +571,15 @@ class MinipupperOperator:
             else:
                 announcement = f"Progress: {cp.progress}%"
 
-        # Enqueue for speech and status display
+        # Speak the response with barge-in support
         try:
-            output_text_queue.put(announcement)
-        except Exception:
-            pass
-        try:
-            status_queue.put(announcement)
-        except Exception:
-            pass
+            self.logger.info("Gateway response: %s", announcement[:200])
+            if self.audio_manager:
+                completed = self.audio_manager.speak(announcement)
+                if not completed:
+                    self.logger.info("Gateway response speech interrupted by user")
+        except Exception as e:
+            self.logger.error("Error speaking Gateway response: %s", e)
     
     def _movement_worker(self):
         """Worker: Execute movement commands"""
