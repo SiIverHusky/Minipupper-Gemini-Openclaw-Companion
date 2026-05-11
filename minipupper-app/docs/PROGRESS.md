@@ -194,3 +194,52 @@ print(f'Transcribed: {text}')
 **Last Updated:** 2026-05-09  
 **Next Review:** 2026-05-15
 
+
+---
+
+## 2026-05-11 — Phase 2: OpenClaw Agent Integration
+
+### Completed
+- ✅ **File-Based Task Protocol**
+  - Shared `tasks.json` replaces Gateway session-based communication
+  - App writes tasks via Gemini `[TASK]` markers in system prompt
+  - Gateway cron processes pending tasks (web_search, robot.*)
+  - Results written back with status="completed"
+  
+- ✅ **TaskWatcher Module** (`src/core/task_watcher.py`)
+  - Polls `tasks.json` every 2 seconds for completed tasks
+  - Generates Gemini-powered TTS announcements
+  - `announced` flag prevents re-announcement across restarts
+  - Announces progress markers (phase changes, 20%+ jumps)
+  - Startup cleanup: archives stale tasks from previous sessions
+  
+- ✅ **TaskArchiver Module** (`src/core/task_archiver.py`)
+  - Date-partitioned archive storage (`tasks_archive/YYYY-MM-DD.json`)
+  - Archive index for metadata lookups (`tasks_archive.json`)
+  - Non-destructive archive (doesn't touch active `tasks.json`)
+  - CLI tool: `scripts/manage_archives.py`
+  
+- ✅ **Gateway Integration**
+  - 5s cron polls tasks.json for pending tasks
+  - Heartbeat (5s, main session) processes pending tasks
+  - File read/write via node exec
+  - Cleans up announced+completed tasks from active file
+  - Stable sub-agent session for app↔agent communication
+  
+- ✅ **Architecture Evolution**
+  - Initial: Session-based protocol (deprecated — session pollution issues)
+  - Current: File-based protocol (clean, debuggable, race-free)
+  - Progress markers written as cron processes
+
+### In Progress
+- 🔄 Reducing end-to-end latency (currently ~15-20s)
+- 🔄 Persistent file watcher to replace cron polling
+
+### Key Decisions
+| Decision | Rationale |
+|----------|-----------|
+| File-based over session-based | Eliminates session pollution, stale message replay, "skipped" loops |
+| `announced` flag over memory set | Persists across restarts, no re-announcement |
+| Cron + TaskWatcher separation | Cron writes status/result; TaskWatcher writes announced flag — no race |
+| Non-destructive archive | Prevents race condition with cron writing to same file |
+| Gemini 2.5-flash (upgraded) | Faster responses than 1.5-flash |

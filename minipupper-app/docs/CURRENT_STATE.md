@@ -1,55 +1,66 @@
 # Current State
 
-Last Updated: 2026-05-10
+**Last Updated:** 2026-05-11
 
 ## Summary
 
-The app is operational end-to-end:
+The app is operational end-to-end with Phase 2 (OpenClaw Agent Integration) in active development.
 
-- ASR: Google Cloud Speech-to-Text primary, Whisper fallback path
-- LLM: Gemini Vertex primary
-- TTS: Google Cloud TTS with interruptible playback
-- Barge-in: streaming VAD with in-app reference AEC and near-end gating
+## Completed
 
-## What Works Reliably
+### Phase 1 — Audio Pipeline (Done)
+- ✅ ASR: Google Cloud Speech-to-Text primary, Whisper fallback path
+- ✅ LLM: Gemini Vertex AI (gemini-2.5-flash)
+- ✅ TTS: Google Cloud TTS with interruptible playback
+- ✅ Barge-in: streaming VAD with in-app reference AEC and near-end gating
+- ✅ Conversation management with context window
+- ✅ Queue-based worker architecture
 
-- Normal speech-to-response loop
-- Most user interruptions while TTS is active
-- Recovery from missed VAD capture in test_pipeline via fixed-duration fallback
+### Phase 2 — OpenClaw Agent Integration (In Progress)
+- ✅ **File-based task protocol** — shared `tasks.json` replaces session messaging
+- ✅ **Gemini task offloading** — `[TASK]` markers in system prompt
+- ✅ **TaskWatcher** — polls file every 2s, announces completed tasks via LLM+TTS
+- ✅ **TaskArchiver** — date-partitioned archive of completed tasks
+- ✅ **Gateway cron processor** — polls every 5s, executes web_search, robot.* tasks
+- ✅ **Announced flag** — prevents re-announcement across restarts
+- ✅ **Auto-cleanup** — announced+completed tasks moved to archive
+- ✅ **OpenClaw node connection** — stable via Tailscale TLS
+- ✅ **Shared session** for app↔Gateway communication
 
-## Known Issues (Observed in Real Logs)
+## Known Issues
 
-- Some speaker bleed still causes false interruption events.
-- Some interrupted utterances are too short/noisy and transcribe as empty text.
-- Calibration can report low quality when playback-to-mic coupling is weak, resulting in low-confidence suggested values.
+- Cor cron isolated agent startup adds ~10s latency per task
+- File-based polling has inherent ~5-7s delay (cron interval + model startup)
+- Some speaker bleed causes false interruption events (Phase 1 issue)
+- gemini-2.5-flash model name in config not 1.5-flash (upgrade)
 
-## Why This Happens
+## Quick Test
 
-- In-app AEC is heuristic and depends on accurate playback reference alignment.
-- Acoustic path changes (robot posture, room reflections, speaker volume) can invalidate tuned values.
-- Interruption often produces short fragments that are below reliable ASR threshold.
-
-## Recommended Test Order
-
-1. python scripts/calibrate_aec.py --duration 5 --write-config
-2. Verify calibration_quality is medium/high.
-3. python scripts/test_bargein.py
-4. python scripts/test_pipeline.py --continuous
-
-If quality is low, do not trust the written values without manual tightening.
-
-## Manual Tightening Baseline
-
-```yaml
-barge_in:
-  nearend_mic_to_playback_ratio: 1.25
-  nearend_frames_required: 5
-  startup_grace_ms: 380
+```bash
+python minipupper_operator.py
+# Say: "what's the weather in Beijing"
+# Expect: ~15-20s response time via Gateway agent
 ```
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `minipupper_operator.py` | Main application entry point |
+| `config/system_prompt_phase2.txt` | Gemini prompt with Phase 2 offloading |
+| `src/core/task_watcher.py` | Watches `tasks.json`, announces completions |
+| `src/core/task_archiver.py` | Archives completed tasks to history |
+| `src/core/llm_engine.py` | LLM abstraction (Gemini, Ollama, fallback) |
+| `src/audio/audio_manager.py` | ASR/TTS with barge-in |
+| `tasks.json` | Shared task file (app ↔ Gateway agent) |
+| `PHASE2.md` | Full Phase 2 protocol documentation |
 
 ## Scope of Current Docs
 
 - README.md: project overview and current architecture
 - QUICKSTART.md: setup and run commands
+- PHASE2.md: Phase 2 protocol and architecture
 - docs/BARGE_IN_GUIDE.md: barge-in internals and tuning
 - docs/DEPLOYMENT_GUIDE.md: operational guidance
+- docs/TASK_ARCHIVING.md: task archival system
+- docs/CURRENT_STATE.md: this file
