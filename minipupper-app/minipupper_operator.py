@@ -419,6 +419,10 @@ class MinipupperOperator:
                             if hasattr(self, 'task_watcher') and self.task_watcher:
                                 self.task_watcher.write_task(task_data)
                                 self.logger.info("Phase 2: Wrote task to tasks.json for agent")
+                                # Notify the agent via Gateway — triggers immediate processing
+                                if self.gateway_client and self.gateway_client.is_connected:
+                                    self.gateway_client.send_sessions_send("main", "task_written")
+                                    self.logger.info("Phase 2: Notified agent via main session")
                                 # Speak introductory text (before [TASK])
                                 if spoken_text:
                                     output_text_queue.put(spoken_text)
