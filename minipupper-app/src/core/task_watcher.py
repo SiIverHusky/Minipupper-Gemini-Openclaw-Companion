@@ -18,7 +18,8 @@ import logging
 import os
 import threading
 import time
-from typing import Optional
+import uuid
+from typing import Optional, List
 
 from src.core.task_archiver import TaskArchiver
 
@@ -35,6 +36,7 @@ class TaskWatcher:
         self.llm = llm
         self.audio_manager = audio_manager
         self.archiver = TaskArchiver()
+        self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -87,27 +89,44 @@ class TaskWatcher:
 
     def write_task(self, task_data: dict):
         """Write a new pending task to the file."""
-        tasks = self._load_tasks()
-        task_id = task_data.get("taskId", f"task-{int(time.time())}")
-        tasks[task_id] = {
-            "taskId": task_id,
-            "action": task_data.get("action", ""),
-            "params": task_data.get("params", {}),
-            "userQuery": task_data.get("userQuery", ""),
-            "status": "pending",
-            "phase": "queued",
-            "progress": 0,
-            "message": "Waiting for agent...",
-            "result": None,
-            "error": None,
-            "announced": False,
-            "createdAt": time.time(),
-            "updatedAt": time.time(),
-        }
-        self._save_tasks(tasks)
-        # announced flag set to False — TaskWatcher detects when cron marks it True
-        logger.info("TaskWatcher: wrote pending task %s (%s)",
-                     task_id[:8], task_data.get("action"))
+        task_ids = self.write_tasks([task_data])
+        return task_ids[0] if task_ids else None
+
+    def write_tasks(self, task_items: List[dict]) -> List[str]:
+        """Write one or more new pending tasks to the file."""
+        if not task_items:
+            return []
+
+        task_ids: List[str] = []
+        with self._lock:
+            tasks = self._load_tasks()
+            for task_data in task_items:
+                task_id = task_data.get("taskId") or f"task-{uuid.uuid4().hex[:12]}"
+                tasks[task_id] = {
+                    "taskId": task_id,
+                    "action": task_data.get("action", ""),
+                    "params": task_data.get("params", {}),
+                    "userQuery": task_data.get("userQuery", ""),
+                    "status": "pending",
+                    "phase": "queued",
+                    "progress": 0,
+                    "message": "Waiting for agent...",
+                    "result": None,
+                    "error": None,
+                    "announced": False,
+                    "createdAt": time.time(),
+                    "updatedAt": time.time(),
+                }
+                task_ids.append(task_id)
+            self._save_tasks(tasks)
+
+        if len(task_ids) == 1:
+            logger.info("TaskWatcher: wrote pending task %s (%s)",
+                        task_ids[0][:8], task_items[0].get("action"))
+        else:
+            logger.info("TaskWatcher: wrote %d pending tasks %s",
+                        len(task_ids), ", ".join(task_id[:8] for task_id in task_ids))
+        return task_ids
 
     def _announce_progress(self, task: dict):
         """Use Gemini to generate a brief progress TTS announcement."""

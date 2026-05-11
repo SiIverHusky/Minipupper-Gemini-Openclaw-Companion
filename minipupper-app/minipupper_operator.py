@@ -4,6 +4,7 @@ Autonomous Operator role with robust capabilities
 Last Updated: 2026-05-10
 """
 
+import json
 import logging
 import os
 import sys
@@ -405,46 +406,38 @@ class MinipupperOperator:
                 # Gemini decides whether to handle locally or offload to agent
                 response = self._process_user_input(text)
                 
-                # Phase 2: Check if Gemini wants to offload a task to the OpenClaw agent
-                # Look for [TASK]...[/TASK] markers in Gemini's response
-                task_match = re.search(r'\[TASK\](.*?)\[/TASK\]', response, re.DOTALL)
-                if task_match:
-                    task_json_str = task_match.group(1).strip()
-                    spoken_text = response[:task_match.start()].strip()
-                    try:
-                        import json
-                        task_data = json.loads(task_json_str)
-                        # Validate it's a proper protocol message
-                        if task_data.get("protocol") == "minipupper-v1" and task_data.get("type") == "task":
-                            self.logger.info("Phase 2: Offloading task to agent: %s", task_data.get("action", "unknown"))
-                            # Write to shared task file for the agent to pick up
-                            if hasattr(self, 'task_watcher') and self.task_watcher:
-                                self.task_watcher.write_task(task_data)
-                                self.logger.info("Phase 2: Wrote task to tasks.json for agent")
-                                if self.gateway_client and self.gateway_client.is_connected:
-                                    cron_id = getattr(self, "_cron_job_id", "")
-                                    if cron_id:
-                                        self.gateway_client.trigger_cron(cron_id)
-                                        self.logger.info("Phase 2: Triggered cron %s for task processing", cron_id)
-                                    else:
-                                        self.gateway_client.send_sessions_send(
-                                            getattr(self, "_agent_session", "") or "main",
-                                            "task_written"
-                                        )
-                                        self.logger.info("Phase 2: Notified agent via main session")
-                                # Speak introductory text (before [TASK])
-                                if spoken_text:
-                                    output_text_queue.put(spoken_text)
-                                    try:
-                                        completed = self.audio_manager.speak(spoken_text)
-                                        if not completed:
-                                            self.logger.info("Speech interrupted")
-                                    except Exception:
-                                        pass
-                                self.current_state = "idle"
-                                continue
-                    except (json.JSONDecodeError, Exception) as e:
-                        self.logger.warning("Phase 2: Invalid task JSON from Gemini: %s", e)
+                # Phase 2: Check if Gemini wants to offload one or more tasks to the OpenClaw agent.
+                spoken_text, task_payloads = self._extract_task_blocks(response)
+                if task_payloads:
+                    self.logger.info("Phase 2: Offloading %d task(s) to agent", len(task_payloads))
+                    if not spoken_text:
+                        spoken_text = "I'll handle that now."
+                    # Write all pending tasks first, then trigger cron once for the full batch.
+                    if hasattr(self, 'task_watcher') and self.task_watcher:
+                        self.task_watcher.write_tasks(task_payloads)
+                        self.logger.info("Phase 2: Wrote %d task(s) to tasks.json for agent", len(task_payloads))
+                        if self.gateway_client and self.gateway_client.is_connected:
+                            cron_id = getattr(self, "_cron_job_id", "")
+                            if cron_id:
+                                self.gateway_client.trigger_cron(cron_id)
+                                self.logger.info("Phase 2: Triggered cron %s for %d task(s)", cron_id, len(task_payloads))
+                            else:
+                                self.gateway_client.send_sessions_send(
+                                    getattr(self, "_agent_session", "") or "main",
+                                    "task_written"
+                                )
+                                self.logger.info("Phase 2: Notified agent via main session")
+                        # Speak introductory text once before the task batch executes.
+                        if spoken_text:
+                            output_text_queue.put(spoken_text)
+                            try:
+                                completed = self.audio_manager.speak(spoken_text)
+                                if not completed:
+                                    self.logger.info("Speech interrupted")
+                            except Exception:
+                                pass
+                        self.current_state = "idle"
+                        continue
                 
                 # Fallback: No offload or failed to send — speak Gemini's response locally
                 
@@ -771,6 +764,40 @@ class MinipupperOperator:
             self.logger.error(f"Error processing input: {e}")
             self.current_state = "idle"
             return "I encountered an error processing your request. Please try again."
+
+    def _extract_task_blocks(self, response: str):
+        """Split Gemini output into spoken text and one or more task payloads."""
+        task_pattern = re.compile(r'\[TASK\](.*?)\[/TASK\]', re.DOTALL)
+        matches = list(task_pattern.finditer(response))
+        if not matches:
+            return response.strip(), []
+
+        spoken_text = response[:matches[0].start()].strip()
+        task_payloads = []
+
+        for match in matches:
+            raw_task = match.group(1).strip()
+            if not raw_task:
+                continue
+
+            try:
+                parsed_task = json.loads(raw_task)
+            except json.JSONDecodeError as e:
+                self.logger.warning("Phase 2: Invalid task JSON from Gemini: %s", e)
+                continue
+
+            if isinstance(parsed_task, list):
+                for item in parsed_task:
+                    if isinstance(item, dict) and item.get("protocol") == "minipupper-v1" and item.get("type") == "task":
+                        task_payloads.append(item)
+                continue
+
+            if isinstance(parsed_task, dict) and parsed_task.get("protocol") == "minipupper-v1" and parsed_task.get("type") == "task":
+                task_payloads.append(parsed_task)
+            else:
+                self.logger.warning("Phase 2: Ignoring unsupported task payload from Gemini")
+
+        return spoken_text, task_payloads
     
     def _get_context_messages(self, max_tokens: int) -> list:
         """

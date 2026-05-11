@@ -69,6 +69,8 @@ pending → running (with progress) → completed (with result)
 
 ### Task Format
 
+Compound requests may be emitted as multiple [TASK] blocks in one Gemini reply. The operator queues each task as a separate pending entry, then triggers cron once so the Gateway processes the full batch.
+
 ```json
 {
   "task-123": {
