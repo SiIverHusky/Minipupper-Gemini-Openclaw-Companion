@@ -28,6 +28,7 @@ from src.core.task_queue import openclaw_queue
 from src.audio.audio_manager import AudioManager, AudioConfig
 from src.audio.barge_in_detector import BargeInConfig
 from src.core.llm_engine import create_llm_provider, Message
+from src.core.task_watcher import TaskWatcher
 from src.openclaw.client import OpenClawClient, load_device_identity
 
 # Setup logging
@@ -149,12 +150,29 @@ class MinipupperOperator:
         )
         self.audio_manager = AudioManager(audio_config)
         
+        # Phase 2: Load the enhanced system prompt that enables task offloading
+        phase2_prompt_path = os.path.join(
+            os.path.dirname(config_path), "system_prompt_phase2.txt"
+        )
+        phase2_prompt = None
+        if os.path.exists(phase2_prompt_path):
+            try:
+                with open(phase2_prompt_path) as f:
+                    phase2_prompt = f.read()
+                self.logger.info("Loaded Phase 2 system prompt from %s", phase2_prompt_path)
+            except Exception as e:
+                self.logger.warning("Could not load Phase 2 prompt: %s", e)
+        
         # LLM Engine (Gemini via Vertex AI)
         self.llm = create_llm_provider(
             provider_name=self.config.get('operator', {}).get('llm_provider', 'gemini'),
             project_id=os.getenv('GOOGLE_CLOUD_PROJECT_ID'),
             model=self.config.get('operator', {}).get('llm_model', 'gemini-1.5-flash'),
+            system_prompt=phase2_prompt,
         )
+        
+        # Phase 2: File-based task watcher for agent communication
+        self.task_watcher = TaskWatcher(llm=self.llm, audio_manager=self.audio_manager)
         
         # State
         self.is_running = False
@@ -167,6 +185,9 @@ class MinipupperOperator:
         self._stop_event = threading.Event()
         self._interrupt_requested = threading.Event()
         self.gateway_client: Optional[OpenClawClient] = None
+        
+        # Phase 2: Track start time for filtering stale gateway messages
+        self._started_at = time.time()
         
         self.logger.info("Minipupper Operator initialized")
         
@@ -223,6 +244,10 @@ class MinipupperOperator:
         # Start worker threads
         self._start_workers()
         
+        # Phase 2: Start file-based task watcher
+        if hasattr(self, 'task_watcher') and self.task_watcher:
+            self.task_watcher.start()
+        
         self.logger.info("Minipupper Operator started")
         self._broadcast_status("Operator ready")
     
@@ -239,6 +264,10 @@ class MinipupperOperator:
             thread.join(timeout=5.0)
         
         self.audio_manager.shutdown()
+        # Phase 2: Stop task watcher
+        if hasattr(self, 'task_watcher') and self.task_watcher:
+            self.task_watcher.stop()
+        
         self.logger.info("Minipupper Operator stopped")
     
     def _start_workers(self):
@@ -370,20 +399,41 @@ class MinipupperOperator:
                 self.current_state = "processing"
                 self._broadcast_status("Processing your request...")
                 
-                # Route to OpenClaw Gateway if connected
-                if self.gateway_client and self.gateway_client.is_connected:
-                    try:
-                        self.gateway_client.send_sessions_send("main", text)
-                        self.logger.info("Sent message to OpenClaw Gateway")
-                        # Response will arrive via Gateway session.message event
-                        # handled by _handle_openclaw_frame → TTS
-                        self.current_state = "idle"
-                        continue
-                    except Exception as e:
-                        self.logger.warning(f"Failed to send to Gateway: {e}")
-                
-                # Fallback: generate local response via Gemini LLM
+                # Phase 2: Always process through Gemini LLM first
+                # Gemini decides whether to handle locally or offload to agent
                 response = self._process_user_input(text)
+                
+                # Phase 2: Check if Gemini wants to offload a task to the OpenClaw agent
+                # Look for [TASK]...[/TASK] markers in Gemini's response
+                task_match = re.search(r'\[TASK\](.*?)\[/TASK\]', response, re.DOTALL)
+                if task_match:
+                    task_json_str = task_match.group(1).strip()
+                    spoken_text = response[:task_match.start()].strip()
+                    try:
+                        import json
+                        task_data = json.loads(task_json_str)
+                        # Validate it's a proper protocol message
+                        if task_data.get("protocol") == "minipupper-v1" and task_data.get("type") == "task":
+                            self.logger.info("Phase 2: Offloading task to agent: %s", task_data.get("action", "unknown"))
+                            # Write to shared task file for the agent to pick up
+                            if hasattr(self, 'task_watcher') and self.task_watcher:
+                                self.task_watcher.write_task(task_data)
+                                self.logger.info("Phase 2: Wrote task to tasks.json for agent")
+                                # Speak introductory text (before [TASK])
+                                if spoken_text:
+                                    output_text_queue.put(spoken_text)
+                                    try:
+                                        completed = self.audio_manager.speak(spoken_text)
+                                        if not completed:
+                                            self.logger.info("Speech interrupted")
+                                    except Exception:
+                                        pass
+                                self.current_state = "idle"
+                                continue
+                    except (json.JSONDecodeError, Exception) as e:
+                        self.logger.warning("Phase 2: Invalid task JSON from Gemini: %s", e)
+                
+                # Fallback: No offload or failed to send — speak Gemini's response locally
                 
                 if response:
                     # Log generated response text at INFO so operator output is visible
@@ -425,7 +475,15 @@ class MinipupperOperator:
 
         # Load device identity if available
         device_identity = load_device_identity()
-        self.gateway_client = OpenClawClient(gateway_url, device_identity=device_identity)
+        # Phase 2: Determine agent session from config
+        self._agent_session = self.config.get('network', {}).get('session_target', None)
+        if self._agent_session:
+            self.logger.info("Phase 2: Agent session target: %s", self._agent_session)
+        self.gateway_client = OpenClawClient(
+            gateway_url,
+            device_identity=device_identity,
+            session_target=self._agent_session or 'main',
+        )
 
         def handler(frame: dict):
             try:
@@ -508,8 +566,37 @@ class MinipupperOperator:
         return False
 
     def _handle_openclaw_frame(self, frame: dict):
-        """Process raw frame from OpenClaw Gateway and potentially announce via LLM."""
-        # Build a minimal checkpoint from the frame
+        """Process raw frame from OpenClaw Gateway and potentially announce via LLM.
+
+        Phase 2: Before falling back to freeform parsing, check for structured
+        minipupper-v1 protocol messages. If found, use the protocol handler
+        for clean status/result extraction.
+
+        Phase 2b: Only process protocol messages from 'assistant' role that
+        are actual task results, not internal cron chatter.
+        """
+        # Phase 2b: Skip messages from 'user' role (our own task sends echo back)
+        if frame.get('event') == 'session.message':
+            msg_role = frame.get('payload', {}).get('message', {}).get('role', '')
+            msg_content = frame.get('payload', {}).get('message', {}).get('content', '')
+            if msg_role == 'user':
+                return  # Don't process our own messages echoing back
+        # Phase 2: Try structured protocol first
+        try:
+            from src.core.protocol_handler import handle_protocol_frame
+            announcement = handle_protocol_frame(frame, self.llm, started_at=self._started_at)
+            if announcement:
+                self.logger.info("Gateway response: %s", announcement[:200])
+                return
+        except Exception:
+            pass
+
+        # Legacy fallback: Build a minimal checkpoint from the frame
+        # Phase 2: Skip stale messages (older than 120s before startup)
+        if hasattr(self, '_started_at'):
+            msg_ts = frame.get('payload', {}).get('message', {}).get('timestamp', 0)
+            if msg_ts and msg_ts < self._started_at:
+                return
         cp = MinipupperOperator.Checkpoint()
         cp.raw = frame
         cp.gateway_connected = True
@@ -571,15 +658,12 @@ class MinipupperOperator:
             else:
                 announcement = f"Progress: {cp.progress}%"
 
-        # Speak the response with barge-in support
+        # Keep Gateway updates as logs only.
+        # TTS should speak only direct LLM output from user interactions.
         try:
             self.logger.info("Gateway response: %s", announcement[:200])
-            if self.audio_manager:
-                completed = self.audio_manager.speak(announcement)
-                if not completed:
-                    self.logger.info("Gateway response speech interrupted by user")
         except Exception as e:
-            self.logger.error("Error speaking Gateway response: %s", e)
+            self.logger.error("Error handling Gateway response: %s", e)
     
     def _movement_worker(self):
         """Worker: Execute movement commands"""

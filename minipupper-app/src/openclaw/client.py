@@ -156,8 +156,10 @@ def build_v2_signature_payload(
 class OpenClawClient:
     """Threaded WebSocket client for the remote OpenClaw Gateway."""
 
-    def __init__(self, gateway_url: str, device_identity: Optional[dict] = None):
+    def __init__(self, gateway_url: str, device_identity: Optional[dict] = None,
+                 session_target: str = 'main'):
         self.gateway_url = gateway_url
+        self.session_target = session_target
         self.ws = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -454,7 +456,7 @@ class OpenClawClient:
                     continue
 
                 backoff = 1.0
-                self.subscribe_session_messages('main')
+                self.subscribe_session_messages(self.session_target)
 
                 while not self._stop.is_set():
                     try:

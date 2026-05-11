@@ -1,86 +1,59 @@
-# Minipupper Operator App Configuration
-# Last Updated: 2026-05-09
-
 app:
-  name: "Minipupper Operator"
-  version: "0.1.0"
   debug: true
-  log_level: "INFO"
-
-# Audio Configuration
+  log_level: INFO
+  name: Minipupper Operator
+  version: 0.1.0
 audio:
-  channels: 1
-  input_device: -1   # -1 = default input device
-  output_device: -1  # -1 = default output device
   asr:
-    engine: "google"  # "google" (Cloud Speech-to-Text) or "whisper" (local Whisper model)
-    model: "base"  # Used only if engine is "whisper" (tiny, base, small, medium, large)
-    language: "en-US"
-    device: "cpu"  # cuda or cpu (used for whisper only)
-    compute_type: "float16"  # Used for whisper only
+    compute_type: float16
+    device: cpu
+    engine: google
+    language: en-US
+    model: base
     streaming: true
-  
+  channels: 1
+  input_device: -1
+  output_device: -1
   tts:
-    engine: "google"  # google or piper
-    voice: "en-US-Neural2-A"
-    speed: 1.0
+    engine: google
     pitch: 0.0
-
-# Barge-in / Interruption Settings
+    speed: 1.0
+    voice: en-US-Neural2-A
 barge_in:
-  enabled: true
-  vad_aggressiveness: 2  # 0-3, higher is more aggressive
-  detection_timeout_ms: 90  # How long voiced speech must persist before interrupting
-  silence_duration_ms: 300   # Duration of silence to consider barge-in complete
-  frame_duration_ms: 30  # WebRTC VAD frame size
+  aec_double_talk_ratio: 1.2
   aec_enabled: true
-  aec_max_delay_ms: 149  # Playback-to-mic delay search window
-  aec_max_gain: 0.8  # Max subtraction gain for playback echo
-  aec_double_talk_ratio: 1.2  # Keep near-end speech when user is louder than speaker bleed
-  echo_suppression_threshold: 0.7
+  aec_max_delay_ms: 149
+  aec_max_gain: 0.8
+  detection_timeout_ms: 90
   echo_energy_ratio: 0.219
-  nearend_min_cleaned_rms: 300.0
-  nearend_mic_to_playback_ratio: 1.15
+  echo_suppression_threshold: 0.7
+  enabled: true
+  frame_duration_ms: 30
   nearend_frames_required: 4
+  nearend_mic_to_playback_ratio: 1.15
+  nearend_min_cleaned_rms: 300.0
+  silence_duration_ms: 300
   startup_grace_ms: 300
-
-# Operator Mode Settings
+  vad_aggressiveness: 2
+logging:
+  backup_count: 5
+  console_output: true
+  file: logs/minipupper_operator.log
+  max_file_size_mb: 50
+network:
+  default_port: 8888
+  gateway_url: ${OPENCLAW_GATEWAY_URL}
+  local_network: true
+  session_target: agent:main:subagent:4677a665-a8e3-4eb1-a2fd-1cec8ee79eb0
+  tailscale_enabled: true
 operator:
-  role: "minipupper_autonomous"  # Not dependent on OpenClaw
-  
-  # LLM Configuration
-  llm_provider: "gemini"  # "gemini" (Vertex AI), "ollama" (local), or "fallback"
-  llm_model: "gemini-2.5-flash"  # Gemini model variant
-  
-  # Context & Response
-  max_context_length: 8192  # Max tokens to keep in conversation history
-  max_response_tokens: 500   # Max tokens in generated response
-  response_timeout_seconds: 30  # Max wait for LLM response
-  
-  # Capabilities
-  enable_tool_execution: true  # Allow robot movement commands
-  
-  # Movement capabilities
+  enable_tool_execution: true
+  llm_model: gemini-2.5-flash
+  llm_provider: gemini
+  max_context_length: 8192
+  max_response_tokens: 500
   movements:
     enabled: true
     max_speed: 100
-
-# Network Configuration
-network:
-  # Tailscale connectivity
-  tailscale_enabled: true
-  # OpenClaw Gateway URL (wss://host:443)
-  # Read from OPENCLAW_GATEWAY_URL environment variable
-  gateway_url: "${OPENCLAW_GATEWAY_URL}"
-  
-  # Fallback local connectivity
-  local_network: true
-  default_port: 8888
-
-# Logging & Monitoring
-logging:
-  file: "logs/minipupper_operator.log"
-  max_file_size_mb: 50
-  backup_count: 5
-  console_output: true
-
+  response_timeout_seconds: 30
+  role: minipupper_autonomous
