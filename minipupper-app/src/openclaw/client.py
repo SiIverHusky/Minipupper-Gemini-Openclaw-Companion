@@ -38,7 +38,7 @@ PLATFORM = 'linux'
 DEVICE_FAMILY = 'pi'
 CLIENT_MODE = 'cli'
 ROLE = 'operator'
-SCOPES = ['operator.read', 'operator.write']
+SCOPES = ['operator.admin', 'operator.read', 'operator.write']
 
 
 def load_device_identity(path: Optional[str] = None) -> dict:
@@ -234,6 +234,16 @@ class OpenClawClient:
         }
         self._send_json(payload)
 
+
+    def trigger_cron(self, cron_id: str, req_id: Optional[str] = None):
+        """Trigger a cron job to run immediately via Gateway RPC."""
+        payload = {
+            "type": "req",
+            "id": req_id or f"cron-run-{int(time.time()*1000)}",
+            "method": "cron.run",
+            "params": {"id": cron_id},
+        }
+        self._send_json(payload)
     def _send_json(self, obj: dict):
         try:
             if self.ws:

@@ -188,6 +188,8 @@ class MinipupperOperator:
         
         # Phase 2: Track start time for filtering stale gateway messages
         self._started_at = time.time()
+        self._agent_session = self.config.get("network", {}).get("session_target", None)
+        self._cron_job_id = self.config.get("network", {}).get("cron_job_id", "")
         
         self.logger.info("Minipupper Operator initialized")
         
@@ -419,10 +421,17 @@ class MinipupperOperator:
                             if hasattr(self, 'task_watcher') and self.task_watcher:
                                 self.task_watcher.write_task(task_data)
                                 self.logger.info("Phase 2: Wrote task to tasks.json for agent")
-                                # Notify the agent via Gateway — triggers immediate processing
                                 if self.gateway_client and self.gateway_client.is_connected:
-                                    self.gateway_client.send_sessions_send("main", "task_written")
-                                    self.logger.info("Phase 2: Notified agent via main session")
+                                    cron_id = getattr(self, "_cron_job_id", "")
+                                    if cron_id:
+                                        self.gateway_client.trigger_cron(cron_id)
+                                        self.logger.info("Phase 2: Triggered cron %s for task processing", cron_id)
+                                    else:
+                                        self.gateway_client.send_sessions_send(
+                                            getattr(self, "_agent_session", "") or "main",
+                                            "task_written"
+                                        )
+                                        self.logger.info("Phase 2: Notified agent via main session")
                                 # Speak introductory text (before [TASK])
                                 if spoken_text:
                                     output_text_queue.put(spoken_text)
@@ -586,6 +595,10 @@ class MinipupperOperator:
             if msg_role == 'user':
                 return  # Don't process our own messages echoing back
         # Phase 2: Try structured protocol first
+            # Phase 2c: Skip cron session chatter — file-based protocol only
+            session_key = frame.get("payload", {}).get("sessionKey", "")
+            if ":cron:" in session_key:
+                return
         try:
             from src.core.protocol_handler import handle_protocol_frame
             announcement = handle_protocol_frame(frame, self.llm, started_at=self._started_at)
@@ -594,6 +607,10 @@ class MinipupperOperator:
                 return
         except Exception:
             pass
+
+        # Phase 2d: No legacy fallback — file-based protocol only; the file
+        # handles everything.
+        return
 
         # Legacy fallback: Build a minimal checkpoint from the frame
         # Phase 2: Skip stale messages (older than 120s before startup)
@@ -654,6 +671,9 @@ class MinipupperOperator:
             ]
             announcement = self.llm.generate_response(messages=prompt, max_tokens=80)
         except Exception:
+            pass
+            # Phase 2d: No legacy fallback — file-based protocol only
+            return
             # Fallback to raw text
             if cp.last_agent_response:
                 announcement = cp.last_agent_response

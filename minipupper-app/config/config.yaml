@@ -44,8 +44,9 @@ network:
   default_port: 8888
   gateway_url: ${OPENCLAW_GATEWAY_URL}
   local_network: true
-  session_target: agent:main:subagent:4677a665-a8e3-4eb1-a2fd-1cec8ee79eb0
+  session_target: agent:main:dashboard:42e4abe5-8cad-4ab4-a38a-869fc1451fd9
   tailscale_enabled: true
+  cron_job_id: 5f1ccf26-58fe-4df9-8587-d33a98ed94af
 operator:
   enable_tool_execution: true
   llm_model: gemini-2.5-flash
