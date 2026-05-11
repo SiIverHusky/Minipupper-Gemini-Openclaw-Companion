@@ -2,3 +2,5 @@
 reference/
 .env
 tasks.json
+tasks_archive.json
+tasks_archive/

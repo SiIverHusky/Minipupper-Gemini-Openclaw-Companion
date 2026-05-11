@@ -20,6 +20,8 @@ import threading
 import time
 from typing import Optional
 
+from src.core.task_archiver import TaskArchiver
+
 logger = logging.getLogger(__name__)
 
 TASKS_FILE = os.path.expanduser("~/minipupper-app/tasks.json")
@@ -32,11 +34,15 @@ class TaskWatcher:
     def __init__(self, llm, audio_manager):
         self.llm = llm
         self.audio_manager = audio_manager
+        self.archiver = TaskArchiver()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._last_checked_tasks: set = set()
+
 
     def start(self):
+        # Archive any old completed tasks from previous sessions
+        self._archive_old_completed()
+        
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="TaskWatcher"
@@ -44,6 +50,20 @@ class TaskWatcher:
         self._thread.start()
         logger.info("TaskWatcher started (polling %s every %.1fs)",
                      TASKS_FILE, POLL_INTERVAL)
+
+    def _archive_old_completed(self):
+        """Archive completed tasks from previous app sessions silently."""
+        tasks = self._load_tasks()
+        for task_id, task in tasks.items():
+            if task.get("status") in ("completed", "failed"):
+                task["announced"] = True
+                try:
+                    self.archiver.archive_task(task)
+                    logger.info("TaskWatcher: archived stale task %s (%s) on startup",
+                               task_id[:8], task.get("action", "?"))
+                except Exception:
+                    pass
+        self._save_tasks(tasks)
 
     def stop(self):
         self._stop.set()
@@ -80,11 +100,12 @@ class TaskWatcher:
             "message": "Waiting for agent...",
             "result": None,
             "error": None,
+            "announced": False,
             "createdAt": time.time(),
             "updatedAt": time.time(),
         }
         self._save_tasks(tasks)
-        # NOT added to _last_checked_tasks — we detect completion by status change
+        # announced flag set to False — TaskWatcher detects when cron marks it True
         logger.info("TaskWatcher: wrote pending task %s (%s)",
                      task_id[:8], task_data.get("action"))
 
@@ -132,6 +153,7 @@ class TaskWatcher:
         result = task.get("result", "")
         error = task.get("error")
         user_query = task.get("userQuery", "")
+        task_id = task.get("taskId", "unknown")
 
         if error:
             prompt = (
@@ -173,6 +195,26 @@ class TaskWatcher:
             except Exception as e:
                 logger.error("TaskWatcher: TTS error: %s", e)
 
+        # Mark as announced in the active file (prevents re-announcement)
+        # The cron only touches pending tasks, so this is safe
+        self._mark_announced(task_id)
+        
+        # Archive for history (non-destructive - leaves active file intact)
+        logger.info("TaskWatcher: archiving task %s for history", task_id[:8])
+        try:
+            self.archiver.archive_task(task)
+        except Exception as e:
+            logger.warning("TaskWatcher: archive failed: %s", e)
+
+    def _mark_announced(self, task_id: str):
+        """Set announced=True on a completed task so cron cleanup can archive it."""
+        tasks = self._load_tasks()
+        if task_id in tasks:
+            tasks[task_id]["announced"] = True
+            tasks[task_id]["updatedAt"] = time.time()
+            self._save_tasks(tasks)
+            logger.info("TaskWatcher: marked task %s as announced", task_id[:8])
+
     def _run(self):
         # Track last announced progress per task
         _last_announced: dict = {}
@@ -183,10 +225,8 @@ class TaskWatcher:
                     status = task.get("status", "")
                     prev = _last_announced.get(task_id, {})
 
-                    # Completed/failed tasks: always announce once
-                    if status in ("completed", "failed") and task_id not in self._last_checked_tasks:
-                        self._last_checked_tasks.add(task_id)
-                        _last_announced[task_id] = task
+                    # Completed/failed tasks: only announce if not already announced
+                    if status in ("completed", "failed") and not task.get("announced"):
                         logger.info("TaskWatcher: detected completed task %s",
                                      task_id[:8])
                         self._announce_result(task)
