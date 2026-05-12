@@ -19,14 +19,15 @@ audio:
     pitch: 0.0
     speed: 1.0
     voice: en-US-Neural2-A
+  sample_rate: 16000
 barge_in:
   aec_double_talk_ratio: 1.2
   aec_enabled: true
-  aec_max_delay_ms: 149
-  aec_max_gain: 0.8
+  aec_max_delay_ms: 180
+  aec_max_gain: 1.5
   detection_timeout_ms: 90
-  echo_energy_ratio: 0.219
-  echo_suppression_threshold: 0.7
+  echo_energy_ratio: 0.55
+  echo_suppression_threshold: 0.85
   enabled: true
   frame_duration_ms: 30
   nearend_frames_required: 4

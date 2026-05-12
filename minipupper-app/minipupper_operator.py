@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import time
 import re
+import argparse
 from dataclasses import dataclass, field
 
 try:
@@ -51,7 +52,7 @@ class MinipupperOperator:
     - Task execution and movement
     """
     
-    def __init__(self, config_path: str = "config/config.yaml"):
+    def __init__(self, config_path: str = "config/config.yaml", keyboard: bool = False, mute: bool = False):
         """
         Initialize operator.
         
@@ -197,6 +198,13 @@ class MinipupperOperator:
         self.conversation_history = []
         self.checkpoint = None
         
+        # CLI flags
+        self.keyboard_mode = keyboard
+        self.mute_mode = mute
+        # Always set volume on startup: 0% if muted, 100% otherwise
+        # (PulseAudio sink volume persists between runs)
+        self._set_mute_volume()
+        
         # Thread pool
         self._worker_threads = []
         self._stop_event = threading.Event()
@@ -291,14 +299,23 @@ class MinipupperOperator:
     
     def _start_workers(self):
         """Start background worker threads"""
-        # ASR Worker - converts speech to text
-        asr_thread = threading.Thread(
-            target=self._asr_worker,
-            daemon=True,
-            name="ASRWorker"
-        )
-        asr_thread.start()
-        self._worker_threads.append(asr_thread)
+        # Speech-to-text worker (or keyboard input worker)
+        if self.keyboard_mode:
+            kbd_thread = threading.Thread(
+                target=self._keyboard_worker,
+                daemon=True,
+                name="KeyboardWorker"
+            )
+            kbd_thread.start()
+            self._worker_threads.append(kbd_thread)
+        else:
+            asr_thread = threading.Thread(
+                target=self._asr_worker,
+                daemon=True,
+                name="ASRWorker"
+            )
+            asr_thread.start()
+            self._worker_threads.append(asr_thread)
         
         # Operator Worker - processes input and generates responses
         op_thread = threading.Thread(
@@ -401,6 +418,42 @@ class MinipupperOperator:
             except Exception as e:
                 self.logger.error(f"ASR Worker error: {e}")
                 time.sleep(1.0)
+    
+    def _keyboard_worker(self):
+        """Worker: Keyboard input (replaces ASR in --keyboard mode)"""
+        self.logger.info("Keyboard Worker started")
+        print()
+        print("=" * 60)
+        print("  KEYBOARD INPUT MODE")
+        print("  " + "-" * 54)
+        print("  Type your message below and press Enter.")
+        print("  Type 'exit' or 'quit' to stop the operator.")
+        print("  Type 'mute' to toggle TTS on/off (if started with --mute).")
+        print("=" * 60)
+        print()
+
+        while self.is_running:
+            try:
+                user_input = input("> ")
+                if user_input.strip().lower() in ("exit", "quit"):
+                    self.logger.info("Exit requested via keyboard")
+                    self.is_running = False
+                    break
+                if user_input.strip().lower() == "mute":
+                    self.mute_mode = not self.mute_mode
+                    self._set_mute_volume()
+                    status = "OFF" if self.mute_mode else "ON"
+                    print(f"[Mute mode is now {status}]")
+                    continue
+                if user_input.strip():
+                    input_text_queue.put(user_input.strip())
+            except EOFError:
+                break
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                self.logger.error(f"Keyboard Worker error: {e}")
+                time.sleep(0.5)
     
     def _operator_worker(self):
         """Worker: Process input and generate responses"""
@@ -967,6 +1020,28 @@ class MinipupperOperator:
         self.logger.debug("Moving right")
         self._broadcast_status("Moving right")
     
+    def _set_mute_volume(self):
+        """Set PulseAudio volume based on mute_mode flag.
+
+        In mute mode, sets speaker volume to 0% but keeps TTS pipeline running.
+        When unmuted, restores to 100%.
+        """
+        try:
+            import subprocess
+            volume = "0%" if self.mute_mode else "100%"
+            # Try both AEC sink and direct PulseAudio default
+            subprocess.run(
+                ["pactl", "set-sink-volume", "aec_sink_hp", volume],
+                capture_output=True, timeout=2
+            )
+            subprocess.run(
+                ["pactl", "set-sink-volume", "@DEFAULT_SINK@", volume],
+                capture_output=True, timeout=2
+            )
+            self.logger.info(f"Mute volume set to {volume}")
+        except Exception as e:
+            self.logger.debug(f"Cannot set PulseAudio volume: {e}")
+
     def _broadcast_status(self, status: str):
         """Broadcast status update"""
         try:
@@ -977,17 +1052,47 @@ class MinipupperOperator:
 
 def main():
     """Main entry point"""
-    operator = MinipupperOperator()
-    
+    parser = argparse.ArgumentParser(
+        description="Minipupper Operator — Autonomous robot assistant",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  %(prog)s                          Normal mode (voice in/out)
+  %(prog)s -k                       Keyboard input mode (no STT)
+  %(prog)s -m                       Mute mode (no TTS, output in log)
+  %(prog)s -k -m                    Keyboard + silent (dev mode)
+        """
+    )
+    parser.add_argument(
+        "-k", "--keyboard",
+        action="store_true",
+        help="Disable speech-to-text; use terminal keyboard for input"
+    )
+    parser.add_argument(
+        "-m", "--mute",
+        action="store_true",
+        help="Disable text-to-speech; show responses on screen only"
+    )
+    args = parser.parse_args()
+
+    operator = MinipupperOperator(keyboard=args.keyboard, mute=args.mute)
+
     try:
         operator.start()
-        logger.info("✓ Minipupper Operator running. Listening for speech...")
+
+        if args.keyboard:
+            logger.info("\u2713 Minipupper Operator running. Using KEYBOARD input.")
+            logger.info("Type your messages in the terminal and press Enter.")
+        elif args.mute:
+            logger.info("\u2713 Minipupper Operator running. TTS is MUTED.")
+            logger.info("Listening for speech... (output shown in log)")
+        else:
+            logger.info("\u2713 Minipupper Operator running. Listening for speech...")
         logger.info("Press Ctrl+C to stop.")
-        
+
         # Keep running and wait for signals
         while operator.is_running:
             time.sleep(0.5)
-            
+
     except KeyboardInterrupt:
         logger.info("\nReceived shutdown signal")
     except Exception as e:
