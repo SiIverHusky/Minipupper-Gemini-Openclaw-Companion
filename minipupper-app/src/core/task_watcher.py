@@ -89,15 +89,26 @@ class TaskWatcher:
             return {}
         try:
             with open(TASKS_FILE) as f:
-                return json.load(f)
+                data = json.load(f)
+            # Handle wrapped format: {"tasks": {...}, "archived": [...]}
+            if isinstance(data, dict) and "tasks" in data:
+                return data["tasks"]
+            # Legacy flat format: {"task-id": {...}, ...}
+            if isinstance(data, dict):
+                return data
+            return {}
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("TaskWatcher: could not read tasks: %s", e)
             return {}
 
     def _save_tasks(self, tasks: dict):
         os.makedirs(os.path.dirname(TASKS_FILE), exist_ok=True)
+        # Always write in wrapped format: {"tasks": {...}}
+        # This keeps the file format consistent regardless of who writes it
+        # (the gateway agent may also add "archived": [...] to the same file)
+        wrapped = {"tasks": tasks}
         with open(TASKS_FILE, "w") as f:
-            json.dump(tasks, f, indent=2)
+            json.dump(wrapped, f, indent=2)
 
     def write_task(self, task_data: dict):
         """Write a new pending task to the file."""
