@@ -8,10 +8,13 @@
 
 ## 1. The Gap
 
-Phase 2 offloads **known, pre-defined actions** (web_search, robot.move_forward, etc.) to the OpenClaw agent via `[TASK]` markers. If Gemini outputs an action that isn't in the 19-item handler list, the agent returns "Unknown action."
+Phase 2 offloads **known, pre-defined actions** (web_search, robot.move_forward, etc.)
+to the OpenClaw agent via `[TASK]` markers. If Gemini outputs an action that isn't
+in the 19-item handler list, the agent returns "Unknown action."
 
 **Phase 3 removes this constraint.** Gemini can now ask the agent to:
-1. **Explore** — research a hardware capability, software library, or system feature and report findings back to the user
+1. **Explore** — research a hardware capability, software library, or system feature
+   and report findings back to the user
 2. **Implement** — build a new capability from scratch, test it, and get user validation
 
 This turns the agent from a **tool executor** into an **on-demand R&D engineer**.
@@ -61,7 +64,8 @@ This turns the agent from a **tool executor** into an **on-demand R&D engineer**
 
 ### 2.3 Knowledge Base File
 
-The agent stores exploration results in a structured knowledge file that persists across sessions and can be referenced by future tasks.
+The agent stores exploration results in a structured knowledge file that persists
+across sessions and can be referenced by future tasks.
 
 **File:** `~/minipupper-app/knowledge/INDEX.json`  
 **Storage:** `~/minipupper-app/knowledge/{topic}.md`
@@ -100,7 +104,8 @@ When the agent implements a new capability, it writes the code to:
   test_results.md  # Test results and user feedback
 ```
 
-Each custom implementation is registered in `knowledge/INDEX.json` under `implementations` so it can be referenced later.
+Each custom implementation is registered in `knowledge/INDEX.json` under
+`implementations` so it can be referenced later.
 
 ---
 
@@ -215,7 +220,10 @@ Each custom implementation is registered in `knowledge/INDEX.json` under `implem
 
 ### Interaction with user after implementation:
 
-The result text is fed back to Gemini, which generates a natural description. The app then asks the user for evaluation. This is important because the agent can't perceive success — only the human can judge if the robot actually followed them.
+The result text is fed back to Gemini, which generates a natural description.
+The app then asks the user for evaluation. This is important because the
+agent can't perceive success — only the human can judge if the robot
+actually followed them.
 
 ---
 
@@ -423,12 +431,15 @@ User: "Sort of, but it lost me when I moved fast"
 
 ## 10. What the App Needs to Handle Differently
 
-1. **Longer task durations** — exploration and implementation can take 30-60 seconds. The TaskWatcher should announce progress periodically
+1. **Longer task durations** — exploration and implementation can take
+   30-60 seconds. The TaskWatcher should announce progress periodically
    ("Still researching...", "Now testing approach...")
 
-2. **Feedback prompts** — when `requires_feedback` is set, the app should ask the user for evaluation after the result is announced.
+2. **Feedback prompts** — when `requires_feedback` is set, the app should
+   ask the user for evaluation after the result is announced.
 
-3. **Knowledge awareness** — Gemini should know to check the knowledge base before asking for exploration (via system prompt mention).
+3. **Knowledge awareness** — Gemini should know to check the knowledge
+   base before asking for exploration (via system prompt mention).
 
 ---
 

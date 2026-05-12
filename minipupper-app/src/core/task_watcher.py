@@ -33,7 +33,7 @@ POLL_INTERVAL = 2.0  # Check file every 2 seconds
 
 
 class TaskWatcher:
-    def __init__(self, llm, audio_manager, announce_llm=None):
+    def __init__(self, llm, audio_manager, announce_llm=None, on_result=None):
         self._task_display = None
         # Try to initialize the ST7789 LCD display for task status
         try:
@@ -48,6 +48,7 @@ class TaskWatcher:
         self.announce_llm = announce_llm or llm  # dedicated LLM for announcements
         self.audio_manager = audio_manager
         self.archiver = TaskArchiver()
+        self._on_result = on_result
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -288,6 +289,13 @@ class TaskWatcher:
         # ── 5. Only mark announced after successful TTS ────────────
         if tts_succeeded:
             self._mark_announced(task_id)
+
+            # Phase 3: Notify operator of completed task result
+            if self._on_result:
+                try:
+                    self._on_result(task)
+                except Exception as _e:
+                    logger.warning("TaskWatcher: on_result callback failed: %s", _e)
 
             logger.info("TaskWatcher: archiving task %s for history", task_id[:8])
             try:

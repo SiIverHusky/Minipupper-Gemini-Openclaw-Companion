@@ -186,16 +186,40 @@ class MinipupperOperator:
                 "Speak as if you are the robot itself."
             ),
         )
-        self.task_watcher = TaskWatcher(
-            llm=self.llm,
-            announce_llm=self.announce_llm,
-            audio_manager=self.audio_manager,
-        )
-        
         # State
         self.is_running = False
         self.current_state = "idle"
         self.conversation_history = []
+        self._task_results_lock = threading.Lock()
+        self.task_watcher = TaskWatcher(
+            llm=self.llm,
+            announce_llm=self.announce_llm,
+            audio_manager=self.audio_manager,
+            on_result=self._on_task_result,
+        )
+
+        # Phase 3: Pre-inject existing implementations into conversation history
+        # so Gemini knows what is already built on first turn
+        try:
+            _idx_path = os.path.expanduser("~/minipupper-app/knowledge/INDEX.json")
+            if os.path.exists(_idx_path):
+                with open(_idx_path) as _f:
+                    _index = json.load(_f)
+                _existing = []
+                for _topic, _info in _index.items():
+                    _impls = _info.get("implementations", [])
+                    for _impl in _impls:
+                        _impl_path = os.path.expanduser("~/minipupper-app/custom/" + _impl + "/test_results.md")
+                        _tested = os.path.exists(_impl_path)
+                        _summary = _info.get("summary", _topic)
+                        _existing.append("- " + _impl + ": " + _summary + " [tested=" + str(_tested) + "]")
+                if _existing:
+                    _lines = "\n".join(_existing)
+                    _text = "Existing implementations loaded from knowledge base:\n" + _lines
+                    self.conversation_history.append(Message(role="system", content=_text))
+                    self.logger.info("Phase 3: Pre-injected %d existing implementations into conversation history", len(_existing))
+        except Exception as _e:
+            self.logger.warning("Phase 3: Failed to pre-inject knowledge: %s", _e)
         self.checkpoint = None
         
         # CLI flags
@@ -470,7 +494,13 @@ class MinipupperOperator:
                 self.logger.info(f"Operator processing: {text}")
                 self.current_state = "processing"
                 self._broadcast_status("Processing your request...")
-                
+
+                # Phase 3: Drain any completed task results into conversation history,
+                # so Gemini knows what happened and can follow up properly.
+                # (Note: _on_task_result may add during processing, but the lock
+                #  and the fact that the watcher runs on a delay means this is fine.)
+                # (Already injected asynchronously by _on_task_result callback.)
+
                 # Phase 2: Always process through Gemini LLM first
                 # Gemini decides whether to handle locally or offload to agent
                 response = self._process_user_input(text)
@@ -496,6 +526,7 @@ class MinipupperOperator:
                                     "task_written"
                                 )
                                 self.logger.info("Phase 2: Notified agent via main session")
+
                         # Speak introductory text once before the task batch executes.
                         if spoken_text:
                             output_text_queue.put(spoken_text)
@@ -793,6 +824,22 @@ class MinipupperOperator:
                 self.logger.error(f"Control Worker error: {e}")
 
     
+    def _on_task_result(self, task: dict):
+        """Called by TaskWatcher when a task completes and is announced.
+        Injects the result into Gemini's conversation history so it knows
+        what happened on subsequent turns."""
+        action = task.get("action", "unknown")
+        result = task.get("result", "")
+        error = task.get("error")
+        user_query = task.get("userQuery", "")
+        if error:
+            text = f"[Task completed: {action}] Error: {error}"
+        else:
+            text = f"[Task completed: {action}] Result: {result}"
+        with self._task_results_lock:
+            self.conversation_history.append(Message(role="system", content=text))
+        self.logger.info("Phase 3: Injected task result into conversation history: %s", action)
+
     def _process_user_input(self, text: str) -> str:
         """
         Process user input and generate response using Gemini LLM.
