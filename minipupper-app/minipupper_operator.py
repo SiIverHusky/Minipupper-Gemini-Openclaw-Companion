@@ -173,7 +173,23 @@ class MinipupperOperator:
         )
         
         # Phase 2: File-based task watcher for agent communication
-        self.task_watcher = TaskWatcher(llm=self.llm, audio_manager=self.audio_manager)
+        # Use a dedicated LLM provider for announcements to avoid thread contention
+        # with the main operator thread. A simpler system prompt is fine here.
+        self.announce_llm = create_llm_provider(
+            provider_name=self.config.get('operator', {}).get('llm_provider', 'gemini'),
+            project_id=os.getenv('GOOGLE_CLOUD_PROJECT_ID'),
+            model=self.config.get('operator', {}).get('llm_model', 'gemini-1.5-flash'),
+            system_prompt=(
+                "You are a concise status announcer for a robot assistant. "
+                "Keep responses under 2 sentences. Sound natural and helpful. "
+                "Speak as if you are the robot itself."
+            ),
+        )
+        self.task_watcher = TaskWatcher(
+            llm=self.llm,
+            announce_llm=self.announce_llm,
+            audio_manager=self.audio_manager,
+        )
         
         # State
         self.is_running = False

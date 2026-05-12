@@ -114,7 +114,7 @@ For detailed setup instructions, see [minipupper-app/QUICKSTART.md](minipupper-a
 │                                                          │
 │  ┌──────────────┐  ┌──────────┐  ┌──────────────────┐   │
 │  │ Audio Manager│  │    TTS   │  │ LLM Engine       │   │
-│  │ (Google STT) │  │(Google)  │  │ (Gemini 1.5 +    │   │
+│  │ (Google STT) │  │(Google)  │  │ (Gemini 2.5 +    │   │
 │  └──────────────┘  └──────────┘  │ Ollama fallback) │   │
 │       ▲                           └────────┬─────────┘   │
 │       │ Barge-in Detection                 │              │
@@ -154,7 +154,7 @@ For detailed setup instructions, see [minipupper-app/QUICKSTART.md](minipupper-a
 |-----------|---------|-----------|
 | **Audio Manager** | Speech-to-text and text-to-speech | Google Cloud Speech API + TTS |
 | **Barge-In Detector** | Detects user speech during robot speech | Energy-based detection + AEC |
-| **LLM Engine** | AI reasoning and conversation | Gemini 1.5 Flash (Vertex AI) + Ollama fallback |
+| **LLM Engine** | AI reasoning and conversation | Gemini 2.5 Flash (Vertex AI) + Ollama fallback |
 | **Task Queue** | Inter-process communication | Python `queue.Queue` (thread-safe) |
 | **Task Protocol** | File-based task delegation | JSON file polling + archiving |
 | **OpenClaw Client** | Integration with OpenClaw Gateway | WebSocket + REST |

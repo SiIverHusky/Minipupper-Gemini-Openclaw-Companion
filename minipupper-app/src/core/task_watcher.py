@@ -1,3 +1,6 @@
+import sys
+import os
+sys.path.insert(0, os.path.expanduser("~/minipupper-app/scripts"))  # noqa: E402
 """
 Minipupper Phase 2 - Task File Watcher
 
@@ -9,7 +12,7 @@ This replaces the complex session-based protocol with a simple shared file.
 
 Protocol: The file at ~/minipupper-app/tasks.json is the shared task file.
 - App writes tasks with status="pending"
-- Agent updates status to "running" → "completed" or "failed"
+- Agent updates status to "running" -> "completed" or "failed"
 - This watcher detects completed tasks and triggers TTS
 """
 
@@ -30,25 +33,34 @@ POLL_INTERVAL = 2.0  # Check file every 2 seconds
 
 
 class TaskWatcher:
-    """Background thread that watches tasks.json for completed tasks."""
-
-    def __init__(self, llm, audio_manager):
-        self.llm = llm
+    def __init__(self, llm, audio_manager, announce_llm=None):
+        self._task_display = None
+        # Try to initialize the ST7789 LCD display for task status
+        try:
+            import sys as _sys
+            import os as _os
+            _sys.path.insert(0, _os.path.expanduser("~/minipupper-app/scripts"))
+            from display_task_info import TaskDisplay
+            self._task_display = TaskDisplay()
+        except Exception:
+            pass
+        self.llm = llm  # main operator LLM (not used for announcements)
+        self.announce_llm = announce_llm or llm  # dedicated LLM for announcements
         self.audio_manager = audio_manager
         self.archiver = TaskArchiver()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-
+        # Track which task's progress announcement is being made (for interruption context)
+        self._announcing_progress_task_id: Optional[str] = None
+        self._announcing_progress_message: Optional[str] = None
 
     def start(self):
         # Archive any old completed tasks from previous sessions
         self._archive_old_completed()
-        
+
         self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._run, daemon=True, name="TaskWatcher"
-        )
+        self._thread = threading.Thread(target=self._run, daemon=True, name="TaskWatcher")
         self._thread.start()
         logger.info("TaskWatcher started (polling %s every %.1fs)",
                      TASKS_FILE, POLL_INTERVAL)
@@ -129,101 +141,152 @@ class TaskWatcher:
         return task_ids
 
     def _announce_progress(self, task: dict):
-        """Use Gemini to generate a brief progress TTS announcement."""
+        """Announce a progress update using the dedicated announce LLM."""
         phase = task.get("phase", "")
         progress = task.get("progress", 0)
         message = task.get("message", "")
         action = task.get("action", "")
+        task_id = task.get("taskId", "")
 
-        prompt = (
-            f"The OpenClaw agent is making progress on a {action} task: "
-            f"{message} (phase: {phase}, {progress:.0f}% complete). "
-            f"Generate a brief, natural progress update for the user."
-        )
+        # Remember what we're about to announce (for interruption context later)
+        self._announcing_progress_task_id = task_id
+        self._announcing_progress_message = message or f"{action} progress at {progress:.0f}%"
 
-        try:
-            from src.core.llm_engine import Message
-            messages = [
-                Message(role="system", content=(
-                    "You are a concise progress announcer for a robot. "
-                    "Keep responses under 10 words. Sound natural."
-                )),
-                Message(role="user", content=prompt),
-            ]
-            announcement = self.llm.generate_response(
-                messages=messages, max_tokens=50
-            )
-        except Exception as e:
-            logger.warning("TaskWatcher: progress LLM failed: %s", e)
-            announcement = message if len(message) > 3 else f"Working on {action}..."
+        # Generate announcement using the dedicated announce LLM
+        announcement = message if message and len(message) > 3 else f"{action.replace('_', ' ')}: {progress:.0f}% done"
 
         logger.info("TaskWatcher: announcing progress: %s", announcement[:100])
         if self.audio_manager:
             try:
                 completed = self.audio_manager.speak(announcement)
-                if not completed:
-                    logger.info("TaskWatcher: progress interrupted")
             except Exception as e:
                 logger.error("TaskWatcher: TTS error: %s", e)
 
+        # Clear tracking after announcement finishes (or was interrupted)
+        if self._announcing_progress_task_id == task_id:
+            self._announcing_progress_task_id = None
+            self._announcing_progress_message = None
+
     def _announce_result(self, task: dict):
-        """Use Gemini to generate a TTS announcement for a task result."""
+        """Announce task result — interrupts progress, uses LLM, gated on TTS.
+
+        - Interrupts any in-progress speech immediately
+        - If a progress announcement for this same task was interrupted,
+          tells the LLM about the interruption context
+        - Only marks announced=True after TTS successfully completes
+        """
         action = task.get("action", "unknown")
         result = task.get("result", "")
         error = task.get("error")
         user_query = task.get("userQuery", "")
         task_id = task.get("taskId", "unknown")
 
-        if error:
-            prompt = (
-                f"The OpenClaw agent attempted to handle a request to {action} "
-                f"but encountered an error: {error}. "
-                f"The user's request was: '{user_query}'. "
-                f"Briefly apologize and explain the issue."
-            )
-        else:
-            prompt = (
-                f"The OpenClaw agent completed a request to {action}. "
-                f"Result: {result}. "
-                f"The user's request was: '{user_query}'. "
-                f"Summarize the result briefly and naturally for the user."
-            )
+        # ── 1. INTERRUPT any in-progress speech ──────────────────
+        progress_was_interrupted = False
+        interrupted_message = ""
+        was_playing = False
+        if self.audio_manager:
+            try:
+                was_playing = True
+                self.audio_manager.interrupt_speech()
+                import time as _t
+                _t.sleep(0.05)  # tiny settle for audio pipeline
+            except Exception:
+                was_playing = False
 
-        try:
-            from src.core.llm_engine import Message
-            messages = [
-                Message(role="system", content=(
-                    "You are a concise status announcer for a robot operator. "
-                    "Keep responses under 2 sentences. Sound natural and helpful."
-                )),
-                Message(role="user", content=prompt),
-            ]
-            announcement = self.llm.generate_response(
-                messages=messages, max_tokens=100
-            )
-        except Exception as e:
-            logger.warning("TaskWatcher: LLM announcement failed: %s", e)
-            announcement = result if result else f"Task {action} completed."
+        # ── 2. Check if we were just announcing progress for this task ──
+        if (self._announcing_progress_task_id == task_id
+                and self._announcing_progress_message):
+            progress_was_interrupted = True
+            interrupted_message = self._announcing_progress_message
+            logger.info("TaskWatcher: progress for %s was interrupted by result",
+                        task_id[:8])
+
+        self._announcing_progress_task_id = None
+        self._announcing_progress_message = None
+
+        # ── 3. GENERATE announcement text (own LLM, no thread contention) ──
+        if error:
+            # Short path: don't bother LLM for errors
+            announcement = f"Sorry, there was an error: {error}"
+        else:
+            # Build LLM prompt with interruption context if available
+            prompt_parts = []
+            if progress_was_interrupted:
+                prompt_parts.append(
+                    "The previous progress announcement was interrupted "
+                    "because the task completed. "
+                    "Progress that was interrupted: '" + interrupted_message + "'"
+                )
+            if action in ("web_search", "web_fetch", "query"):
+                action_label = action.replace('_', ' ')
+                prompt_parts.append(
+                    "The task was: " + action_label + ". "
+                    "The user asked about: '" + user_query + "'. "
+                    "Result: " + result + ". "
+                    "Summarize briefly and naturally in 1-2 sentences."
+                )
+            else:
+                action_label = action.replace("_", " ").replace("robot", "").strip()
+                prompt_parts.append(
+                    "The task '" + action_label + "' completed. "
+                    + ("Result: " + result if result else "")
+                )
+
+            prompt = "\n".join(prompt_parts)
+
+            try:
+                from src.core.llm_engine import Message
+                messages = [
+                    Message(role="system", content=(
+                        "You are a concise status announcer for a robot assistant. "
+                        "Keep responses under 2 sentences. Sound natural and helpful. "
+                        "Speak as if you are the robot itself."
+                    )),
+                    Message(role="user", content=prompt),
+                ]
+                announcement = self.announce_llm.generate_response(
+                    messages=messages, max_tokens=100
+                )
+            except Exception as e:
+                logger.warning("TaskWatcher: LLM announcement failed: %s", e)
+                announcement = result if result else f"{action.replace('_', ' ')} completed."
 
         logger.info("TaskWatcher: announcing result: %s", announcement[:200])
+
+        # ── 4. SPEAK via TTS ──────────────────────────────────────
+        tts_succeeded = False
         if self.audio_manager:
             try:
                 completed = self.audio_manager.speak(announcement)
-                if not completed:
-                    logger.info("TaskWatcher: announcement interrupted")
+                if completed:
+                    tts_succeeded = True
+                else:
+                    logger.info("TaskWatcher: result interrupted by user, will retry once")
+                    import time as _t
+                    _t.sleep(1.0)
+                    try:
+                        completed = self.audio_manager.speak(announcement)
+                        if completed:
+                            tts_succeeded = True
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.error("TaskWatcher: TTS error: %s", e)
 
-        # Mark as announced in the active file (prevents re-announcement)
-        # The cron only touches pending tasks, so this is safe
-        self._mark_announced(task_id)
-        
-        # Archive for history (non-destructive - leaves active file intact)
-        logger.info("TaskWatcher: archiving task %s for history", task_id[:8])
-        try:
-            self.archiver.archive_task(task)
-        except Exception as e:
-            logger.warning("TaskWatcher: archive failed: %s", e)
+        # ── 5. Only mark announced after successful TTS ────────────
+        if tts_succeeded:
+            self._mark_announced(task_id)
+
+            logger.info("TaskWatcher: archiving task %s for history", task_id[:8])
+            try:
+                self.archiver.archive_task(task)
+            except Exception as e:
+                logger.warning("TaskWatcher: archive failed: %s", e)
+        else:
+            logger.warning(
+                "TaskWatcher: TTS failed for task %s, leaving announced=False for retry",
+                task_id[:8])
 
     def _mark_announced(self, task_id: str):
         """Set announced=True on a completed task so cron cleanup can archive it."""
@@ -234,12 +297,45 @@ class TaskWatcher:
             self._save_tasks(tasks)
             logger.info("TaskWatcher: marked task %s as announced", task_id[:8])
 
+    def _update_display(self, tasks: dict):
+        """Update the LCD display with the most interesting task state."""
+        if not self._task_display:
+            return
+
+        try:
+            import time as _t
+            # Find the most interesting task: running > pending > completed > idle
+            display_task = None
+            priority = -1
+            for tid, task in tasks.items():
+                s = task.get("status", "")
+                p = {"running": 3, "pending": 2, "completed": 1, "failed": 1}.get(s, 0)
+                if p > priority:
+                    priority = p
+                    display_task = task
+
+            if display_task and priority > 0:
+                self._task_display.show_task(
+                    action=display_task.get("action", ""),
+                    status=display_task.get("status", "idle"),
+                    phase=display_task.get("phase", ""),
+                    progress=display_task.get("progress", 0),
+                    message=display_task.get("message", ""),
+                    time_str=_t.strftime("%H:%M"),
+                )
+            else:
+                self._task_display.show_idle()
+        except Exception:
+            pass  # Don't crash if display fails
+
     def _run(self):
         # Track last announced progress per task
         _last_announced: dict = {}
         while not self._stop.is_set():
             try:
                 tasks = self._load_tasks()
+                # Update LCD display with current task state
+                self._update_display(tasks)
                 for task_id, task in tasks.items():
                     status = task.get("status", "")
                     prev = _last_announced.get(task_id, {})
