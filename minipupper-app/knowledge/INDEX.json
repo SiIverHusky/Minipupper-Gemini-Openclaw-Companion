@@ -1,0 +1,88 @@
+{
+  "camera": {
+    "file": "knowledge/camera.md",
+    "title": "Camera Capabilities",
+    "summary": "MIPI CSI camera at /dev/video0, 640x480, OpenCV 4.10.0, no ML frameworks",
+    "created": 1778580000.0,
+    "updated": 1778580000.0,
+    "implementations": [
+      "camera_person_follow"
+    ]
+  },
+  "imu": {
+    "file": "knowledge/imu.md",
+    "title": "IMU (Inertial Measurement Unit)",
+    "summary": "Onboard IMU via ESP32, accelerometer + gyroscope at 20Hz",
+    "created": 1778580000.0,
+    "updated": 1778580000.0,
+    "implementations": []
+  },
+  "battery": {
+    "file": "knowledge/battery.md",
+    "title": "Battery / Power",
+    "summary": "3S LiPo ~11.1V, accessed via ESP32 get_power_status()",
+    "created": 1778580000.0,
+    "updated": 1778580000.0,
+    "implementations": []
+  },
+  "motors": {
+    "file": "knowledge/motors.md",
+    "title": "Motors / Servos",
+    "summary": "12 servos via ESP32, controlled via servos_set_position API",
+    "created": 1778580000.0,
+    "updated": 1778580000.0,
+    "implementations": []
+  },
+  "camera_person_follow": {
+    "file": "custom/camera_person_follow/explore.md",
+    "title": "Camera Person Follower",
+    "summary": "Person following using background subtraction + centroid tracking via OpenCV",
+    "created": 1778586853.613006,
+    "updated": 1778586853.613007,
+    "implementations": [],
+    "tested": true
+  },
+  "script_invocation": {
+    "file": "knowledge/script_invocation.md",
+    "title": "Script Invocation Capability",
+    "summary": "All script invocation paths: tasks.json offloading, minipupper_control.py, scripts/, custom/ modules, and operator internal queues",
+    "created": 1778589534.1477304,
+    "updated": 1778589534.1477315,
+    "implementations": []
+  },
+  "bowling_court_activation": {
+    "file": "knowledge/bowling_court_activation.md",
+    "title": "Bowling Court Activation",
+    "summary": "Robot bowling simulation: approach trot, body roll swing, crouch release, look up follow-through",
+    "created": 1778589700.3648148,
+    "updated": 1778589700.364816,
+    "implementations": []
+  },
+  "camera_live_feed": {
+    "file": "knowledge/camera_live_feed.md",
+    "title": "Camera Live Video Feed",
+    "summary": "Live video feed from MIPI CSI camera to ST7789 LCD using OpenCV capture + PIL resize. Supports both simple blocking and threaded approaches at ~10-15 FPS.",
+    "created": 1778637721.2023673,
+    "updated": 1778637721.202368,
+    "implementations": []
+  },
+  "camera_live_feed_on_screen": {
+    "file": "custom/camera_live_feed_on_screen/main.py",
+    "title": "Live Camera Feed on ST7789 LCD",
+    "summary": "Continuous live video feed from MIPI CSI camera to onboard ST7789 LCD at ~16 FPS. Resizes 640x480 \u2192 320x240, handles graceful shutdown, supports duration limits and video recording.",
+    "created": 1778637799.1915972,
+    "updated": 1778637799.1915982,
+    "implementations": [],
+    "tested": true
+  },
+  "camera_video_feed": {
+    "file": "knowledge/camera_video_feed.md",
+    "title": "Camera Video Feed \u2014 Existing Capability",
+    "summary": "Real-time video feed from MIPI CSI camera to ST7789 LCD is an existing, tested capability via custom/camera_live_feed_on_screen/main.py (~16 FPS).",
+    "created": 1778639742.0840197,
+    "updated": 1778639742.0840204,
+    "implementations": [
+      "camera_live_feed_on_screen"
+    ]
+  }
+}

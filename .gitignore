@@ -1,6 +1,7 @@
 **/__pycache__/
 reference/
 .env
-*.json
-*jsonl
+.json
+jsonl
 tasks_archive/
+archive/

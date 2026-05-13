@@ -77,6 +77,26 @@ python minipupper_operator.py
 
 For detailed setup instructions, see [minipupper-app/QUICKSTART.md](minipupper-app/QUICKSTART.md).
 
+## Gateway (OpenClaw) Setup
+
+If you intend to use OpenClaw for task delegation (recommended for production), set up an OpenClaw gateway and copy the gateway package files to the gateway workspace. Full instructions are in [gateway/SETUP_NEW_GATEWAY.md](gateway/SETUP_NEW_GATEWAY.md).
+
+Quick summary:
+
+- Copy the gateway Python files to the OpenClaw workspace at `~/.openclaw/workspace/minipupper/`.
+- Create the cron job from `gateway/cron_config.json` (replace the placeholder node name) and record the returned `cron_job_id` in `config/config.yaml` under `network: cron_job_id`.
+- Verify the gateway actions with:
+
+```bash
+python3 -c "from minipupper.task_handler import router; print(f'{len(router.list_actions())} actions')"
+```
+
+- Start the app on the Pi after gateway setup:
+
+```bash
+cd ~/minipupper-app && bash scripts/start_with_aec.sh
+```
+
 ## 📚 Documentation Overview
 
 ### For Getting Started

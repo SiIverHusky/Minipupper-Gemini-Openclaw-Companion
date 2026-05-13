@@ -1,0 +1,19 @@
+{
+  "name": "minipupper-task-runner",
+  "description": "Processes ALL pending minipupper tasks. Triggered on-demand by the app. Handles web_search, robot.*, explore, implement, query.",
+  "enabled": false,
+  "schedule": {
+    "kind": "every",
+    "everyMs": 5000
+  },
+  "sessionTarget": "isolated",
+  "wakeMode": "now",
+  "payload": {
+    "kind": "agentTurn",
+    "message": "Minipupper Task Processor\n\nREAD: exec cat ~/minipupper-app/tasks.json (host=node, node=YOUR_NODE_NAME)\n\nPROCESS ALL pending tasks IN ORDER (by createdAt). For each:\n\n- web_search -> use web_search tool\n- web_fetch -> use web_fetch tool\n- robot.*' -> exec on node: python 3 ~/minipupper-app/robot/robot_control.py {action} {duration}\n  Mapping: move_forward->forward, move_backward->backward, strafe_right->right,\n  strafe_left->left, rotate_cw->cw, rotate_ccw->ccw, look_up->look-up,\n  look_down->look-down, raise_body->raise-body, lower_body->lower-body,\n  init->activate, deactivate->deactivate, stop->stop, reset->deactivate, trot->activate\n  Camera: take_photo_and_show -> capture_and_show.py, show_image -> capture_and_show.py --display-only\n- explore -> check knowledge/INDEX.json, return cached info or run exploration\n- implement -> build capability, write code to custom/{topic}/main.py, test, set feedback_required=True\n- query -> answer from context\n\nWrite ALL results to tasks.json in a single write pass at the end.",
+    "timeoutSeconds": 180
+  },
+  "delivery": {
+    "mode": "none"
+  }
+}
