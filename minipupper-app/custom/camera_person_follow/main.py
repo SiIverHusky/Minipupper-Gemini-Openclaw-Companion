@@ -21,22 +21,8 @@ import argparse
 import cv2
 import numpy as np
 
-sys.path.insert(0, os.path.expanduser("~/apps-md-robots"))
-from api.UDPComms import Publisher
-
-
-# ---------------------------------------------------------------------------
-# UDP Joystick Publisher
-# ---------------------------------------------------------------------------
-pub = Publisher(8830, "127.0.0.1")
-UPDATE_INTERVAL = 0.05  # 20 Hz control loop
-
-MSG = {
-    "L1": False, "R1": False, "L2": -1.0, "R2": -1.0,
-    "x": False, "square": False, "circle": False, "triangle": False,
-    "lx": 0.0, "ly": 0.0, "rx": 0.0, "ry": 0.0,
-    "dpadx": 0, "dpady": 0, "message_rate": 20,
-}
+sys.path.insert(0, os.path.expanduser("~/minipupper-app"))
+from robot.continuous_control import ContinuousController
 
 RUNNING = True
 
@@ -85,6 +71,7 @@ def shutdown_robot():
 
 
 def send_velocity(lx=0.0, ly=0.0, rx=0.0, ry=0.0):
+    global ctrl
     """Send velocity / posture command via UDP."""
     pub.send({**MSG, "lx": lx, "ly": ly, "rx": rx, "ry": ry})
 
@@ -245,7 +232,7 @@ def main():
             lost_counter += 1
             if lost_counter >= MAX_LOST:
                 # Person lost for too long - stop
-                pub.send({**MSG, "lx": 0, "ly": 0, "rx": 0, "ry": 0})
+                send_velocity(0,0,0,0)  # stop via FPC
                 if lost_counter == MAX_LOST:
                     print(f"[person-follow] Person lost for {MAX_LOST} frames. Stopped.")
                 if lost_counter >= MAX_LOST + 30:
